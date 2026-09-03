@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # Phase 0: prove the crate builds and its runtime dependencies resolve on all
+  # three platforms. This is the gate the whole plan hangs on.
+  build:
+    name: build / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Linux mounts via the fusermount3 helper, so only the binary is needed —
+      # libfuse headers are deliberately not a build dependency.
+      - name: Install fuse3 (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fuse3
+
+      # macFUSE supplies the mount helper that the libfuse path needs.
+      - name: Install macFUSE (macOS)
+        if: runner.os == 'macOS'
+        run: brew install --cask macfuse || echo "macFUSE needs a kext approval; build-only on CI"
+        continue-on-error: true
+
+      - run: cargo build --all-targets
+      - run: cargo test
+      - run: cargo clippy --all-targets -- -Dwarnings
+      - run: cargo doc --no-deps
+
+      # Reports which backends this runner can actually use. Informational: it
+      # must not fail the build, since hosted runners cannot approve a macOS
+      # kernel extension or enable a Windows optional feature.
+      - name: Backend probe
+        run: cargo run --example probe
+        continue-on-error: true
+
+  # The Linux runner is the only one that can complete a real mount unattended.
+  mount-smoke-test:
+    name: mount smoke test / ubuntu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y fuse3
+      - name: Mount memfs and verify contents
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/anymount-ci
+          cargo build --example memfs
+          ( sleep 25 ) | cargo run -q --example memfs -- /tmp/anymount-ci &
+          sleep 5
+          mount | grep -F /tmp/anymount-ci
+          test "$(cat /tmp/anymount-ci/hello.txt)" = "Hello from anymount!"
+          # Compare a digest taken through the mount against one computed directly.
+          got=$(sha256sum /tmp/anymount-ci/numbers.txt | cut -d' ' -f1)
+          want=$(seq 1 100 | sha256sum | cut -d' ' -f1)
+          test "$got" = "$want"
+          test "$(cat /tmp/anymount-ci/subdir/nested.txt)" = "I am nested."
+          wait
+          ! mount | grep -qF /tmp/anymount-ci
+
+  cross-check:
+    name: cross-compile check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc, aarch64-apple-darwin
+      # `check` needs no linker, so the Windows backends (ProjFS, cfapi) are
+      # type checked on every push without waiting for a Windows runner.
+      - name: Check Windows backends
+        run: cargo check --target x86_64-pc-windows-msvc
+
+      # macOS can only be checked without default features: `fuser`'s build
+      # script calls pkg-config for libfuse, which needs a macOS sysroot that a
+      # Linux runner does not have. The macos-latest job above is what actually
+      # verifies the FUSE backend there; this only catches platform-independent
+      # breakage early.
+      - name: Check macOS (no backend)
+        run: cargo check --target aarch64-apple-darwin --no-default-features
+
+  licenses:
+    name: licence policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check

@@ -1,0 +1,81 @@
+# cargo-deny policy for anymount.
+#
+# This file exists to answer one question on every build:
+#   Is every dependency under a permissive (non-copyleft) licence?
+#
+# It matters more here than in most crates. `anymount` fronts platform
+# filesystem APIs whose usual bindings are copyleft — WinFsp and its Rust
+# bindings are GPL-3.0, Dokany is LGPL, `windows-projfs` is GPL-2.0, and
+# macFUSE's libfuse is LGPL. Avoiding all of them is a deliberate design
+# constraint, and the allow-list below is the enforcement.
+#
+# The two techniques that keep the graph clean:
+#   1. Windows goes through Microsoft's own `windows` crate (MIT OR Apache-2.0),
+#      never a third-party GPL binding.
+#   2. macFUSE's libfuse is resolved at *runtime* by macFUSE's own mount helper,
+#      so it is never a cargo dependency. On Linux, `fuser` is built with
+#      `default-features = false`, which drops libfuse entirely.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "aarch64-pc-windows-msvc" },
+]
+# Optional dependencies still count: a user who enables a backend feature gets
+# its graph too, so all features must be evaluated.
+all-features = true
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+unmaintained = "workspace"
+# Advisories consciously accepted, each with a rationale and a link. Empty is
+# the goal; an entry here is a decision, not a snooze button.
+ignore = []
+
+[licenses]
+# Permissive only. Every licence below imposes no reciprocal source-disclosure
+# obligation on downstream users of `anymount`.
+#
+# Deliberately absent, and the reason this is an allow-list:
+#   - MPL-2.0        weak/file-level copyleft
+#   - LGPL-*         copyleft with linking obligations (Dokany, libfuse)
+#   - GPL-*, AGPL-*  strong copyleft (WinFsp, winfsp-rs, windows-projfs)
+#   - CDDL-*, EPL-*, SSPL-*, BUSL-*
+#
+# If a dependency ever needs one of these, that is a decision to take
+# explicitly, in a PR that edits this list and says why.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Backends whose licences are incompatible with this crate's goals. Listed
+# explicitly so an accidental `cargo add` fails loudly rather than quietly
+# relicensing the crate.
+deny = [
+    { name = "winfsp", reason = "GPL-3.0; would relicense anymount" },
+    { name = "winfsp-sys", reason = "GPL-3.0 bindgen over WinFsp headers" },
+    { name = "windows-projfs", reason = "GPL-2.0; use the `windows` crate instead" },
+    { name = "dokan", reason = "wraps LGPL Dokany" },
+    { name = "dokan-sys", reason = "wraps LGPL Dokany" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

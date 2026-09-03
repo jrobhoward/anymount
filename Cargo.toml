@@ -1,0 +1,62 @@
+[package]
+name = "anymount"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88.0"
+license = "MIT OR Apache-2.0"
+authors = ["James Howard <jrobhoward@gmail.com>"]
+description = "Cross-platform read-only userspace filesystems: FUSE on Linux and macOS, ProjFS or Cloud Files on Windows"
+repository = "https://github.com/jrobhoward/anymount"
+homepage = "https://github.com/jrobhoward/anymount"
+keywords = ["filesystem", "fuse", "projfs", "mount", "userspace"]
+categories = ["filesystem", "os"]
+readme = "README.md"
+
+[features]
+default = ["fuse", "projfs", "cfapi"]
+
+# FUSE backend (Linux, macOS). Inert on Windows.
+fuse = ["dep:fuser"]
+# Windows Projected File System backend. Inert off Windows.
+projfs = ["dep:windows"]
+# Windows Cloud Files (cfapi) backend. Inert off Windows.
+cfapi = ["dep:windows"]
+# Per-operation tracing spans.
+tracing = ["dep:tracing"]
+
+[dependencies]
+thiserror = "2"
+tracing = { version = "0.1", optional = true }
+
+# Linux: no libfuse. `default-features = false` makes `fuser` mount via the
+# `fusermount3` binary, which keeps LGPL libfuse out of the link entirely and
+# allows unprivileged mounts.
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.18", default-features = false, optional = true }
+libc = "0.2"
+
+# macOS: macFUSE provides the mount helper, so the libfuse path is required.
+# The dylib is resolved at runtime, never vendored.
+[target.'cfg(target_os = "macos")'.dependencies]
+fuser = { version = "0.18", optional = true }
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_ProjectedFileSystem",
+    "Win32_Storage_CloudFilters",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+] }
+
+[lints.clippy]
+cognitive_complexity = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
