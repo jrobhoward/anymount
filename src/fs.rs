@@ -7,17 +7,17 @@ use crate::types::{DirEntry, FileAttr, FileHandle, Ino, StatFs};
 
 /// A read-only filesystem.
 ///
-/// The operation set is the FUSE *lowlevel* intersection, chosen because ProjFS
-/// and cfapi map onto it but not the reverse.
+/// The operation set is the FUSE *lowlevel* intersection, chosen because cfapi
+/// maps onto it but not the reverse.
 ///
 /// # Read patterns differ by backend
 ///
 /// [`read_at`](Self::read_at) is called differently by each backend. FUSE issues
-/// random reads driven by the application. ProjFS and cfapi call it
-/// sequentially, during hydration, because both materialise a whole file before
-/// handing it to the application. An implementation that can only decode
-/// sequentially is therefore already efficient on Windows, and needs a cache
-/// only for the FUSE path.
+/// random reads driven by the application. cfapi calls it sequentially, during
+/// hydration, because it materialises a whole file before handing it to the
+/// application. An implementation that can only decode sequentially is
+/// therefore already efficient on Windows, and needs a cache only for the FUSE
+/// path.
 ///
 /// # Concurrency
 ///

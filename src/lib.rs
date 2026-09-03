@@ -7,14 +7,16 @@
 //! |----|-----------|-------|
 //! | Linux | FUSE via `fusermount3` | unprivileged; libfuse never linked |
 //! | macOS | FUSE via macFUSE | kext-free on macFUSE 5.2+ / macOS 15.4+ |
-//! | Windows | ProjFS or Cloud Files | projects into a directory, not a drive letter |
+//! | Windows | Cloud Files (cfapi) | projects into a directory, not a drive letter |
 //!
 //! # Licensing
 //!
 //! `anymount` is MIT OR Apache-2.0 and has **no copyleft anywhere in its
 //! dependency graph**. That is a deliberate design constraint, not an accident:
 //! WinFsp (GPLv3), Dokany (LGPL) and `windows-projfs` (GPL-2.0) are all
-//! excluded, and macFUSE's libfuse is resolved at runtime rather than linked.
+//! excluded — ProjFS itself was evaluated in Phase 0 and dropped for having no
+//! capability advantage over cfapi, see `docs/GAPS.md` — and macFUSE's libfuse
+//! is resolved at runtime rather than linked.
 //! `cargo deny check licenses` enforces this in CI.
 //!
 //! # Example
@@ -58,11 +60,8 @@ pub mod probe {
         cfg!(all(
             any(target_os = "linux", target_os = "macos"),
             feature = "fuse"
-        )) || cfg!(all(windows, any(feature = "projfs", feature = "cfapi")))
+        )) || cfg!(all(windows, feature = "cfapi"))
     }
-
-    #[cfg(all(windows, feature = "projfs"))]
-    pub use crate::backend::projfs::probe as projfs;
 
     #[cfg(all(windows, feature = "cfapi"))]
     pub use crate::backend::cfapi::{PlatformInfo, probe as cfapi};

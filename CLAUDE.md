@@ -6,12 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `anymount` mounts a read-only filesystem from user space on Linux, macOS and
 Windows. An implementor writes one trait, `ReadOnlyFs`; the crate mounts it with
-whatever mechanism the host OS provides — FUSE on Linux and macOS, ProjFS or the
-Cloud Files API (cfapi) on Windows.
+whatever mechanism the host OS provides — FUSE on Linux and macOS, the Cloud
+Files API (cfapi) on Windows.
 
-**Read-only is the scope, not a stage.** Write operations report `EROFS`. ProjFS
-cannot intercept writes at all, so a cross-platform write story would be uneven
-from the start. `docs/GAPS.md` lists every limitation and what changing it costs.
+**Read-only is the scope, not a stage.** Write operations report `EROFS`.
+`docs/GAPS.md` lists every limitation and what changing it costs.
+
+**ProjFS was evaluated in the Windows spike and cut entirely — not deferred,
+not an opt-in feature.** There is no `projfs` module, feature, or `Backend`
+variant in the tree. See `docs/PLAN.md` (Phase 0) and `docs/GAPS.md` for why;
+do not reintroduce it without new evidence that cfapi is insufficient.
 
 The first consumer is `ciphercask` (a separate repo), which will mount an
 encrypted backup archive for restore browsing. That drives several design
@@ -58,7 +62,7 @@ Single crate, edition 2024, `rust-version = 1.88.0`.
 - `fs.rs` — the `ReadOnlyFs` trait: `lookup`, `getattr`, `readdir`, `open`,
   `read_at`, `release`, plus default-implemented `listxattr`, `getxattr`,
   `statfs`. The operation set is the FUSE *lowlevel* intersection, because
-  ProjFS and cfapi map onto it but not the reverse.
+  cfapi maps onto it but not the reverse.
 - `types.rs` — `Ino`, `FileHandle`, `FileAttr`, `DirEntry`, `FileKind`,
   `StatFs`. `FileKind` has only `File` and `Directory`; there is no symlink
   variant.
@@ -68,8 +72,8 @@ Single crate, edition 2024, `rust-version = 1.88.0`.
 - `mount.rs` — `MountBuilder` and `Mount`. `Mount` unmounts on drop;
   `Mount::unmount` surfaces the errors that drop swallows.
 - `backend/` — one module per OS mechanism, `cfg`-gated *and* feature-gated:
-  `fuse.rs` (Linux, macOS), `projfs.rs`, `cfapi.rs` (Windows).
-  `backend/mod.rs` resolves `Backend::Auto` and owns the `MountHandle` enum.
+  `fuse.rs` (Linux, macOS), `cfapi.rs` (Windows). `backend/mod.rs` resolves
+  `Backend::Auto` and owns the `MountHandle` enum.
 
 ### Why it looks like this
 
@@ -80,25 +84,15 @@ without revisiting that:
   and its LAN backend already hides tokio behind its own runtime and `block_on`.
   An async trait could not be fed by it. Concurrency comes from serving FUSE
   requests on several threads (`Config::n_threads`), not from async.
-- **No symlinks.** ciphercask skips them at backup time, and neither ProjFS nor
-  cfapi models them the way FUSE does.
-- **`read_at` takes an offset even though some archives cannot seek.** ProjFS
-  and cfapi call `read_at` sequentially during hydration, because both
-  materialise whole files. Only FUSE issues random reads. An implementor whose
-  archive can only decode from byte 0 should materialise on open and serve reads
-  from a cache; the trait does not change when true streaming becomes possible.
+- **No symlinks.** ciphercask skips them at backup time, and cfapi does not
+  model them the way FUSE does.
+- **`read_at` takes an offset even though some archives cannot seek.** cfapi
+  calls `read_at` sequentially during hydration, because it materialises whole
+  files. Only FUSE issues random reads. An implementor whose archive can only
+  decode from byte 0 should materialise on open and serve reads from a cache;
+  the trait does not change when true streaming becomes possible.
 
 ## Platform constraints worth knowing before editing a backend
-
-**ProjFS entry points must be resolved dynamically.** `ProjectedFSLib.dll`
-exists only once the `Client-ProjFS` optional feature is enabled, and that
-feature is off by default. A load-time import of any `Prj*` symbol stops the
-whole process from starting on a machine without it — the loader fails before
-`main`, so there is no chance to report a useful error and `probe()` could never
-return `false`. `backend/projfs.rs` therefore makes no static reference to any
-`Prj*` symbol and probes with `LoadLibraryW`. Keep it that way: resolve ProjFS
-functions through `GetProcAddress` or delay-loading. cfapi needs no such care —
-`CldApi.dll` ships with every Windows 10 1709+ install.
 
 **FUSE `auto_unmount` requires a non-`Owner` ACL.** `fusermount3` refuses to arm
 it on an owner-private mount, so `auto_unmount` defaults off and `mount()`
@@ -122,7 +116,7 @@ all copyleft, so the crate routes around them:
 |---|---|---|
 | `winfsp`, `winfsp-sys` | GPL-3.0 | nothing; WinFsp is out of scope |
 | `windows-projfs` | GPL-2.0 | Microsoft's `windows` crate |
-| `dokan`, `dokan-sys` | wrap LGPL Dokany | ProjFS or cfapi |
+| `dokan`, `dokan-sys` | wrap LGPL Dokany | cfapi |
 | libfuse (linked) | LGPL | `fusermount3` on Linux; runtime dylib on macOS |
 
 `deny.toml` bans those crates by name, so an accidental `cargo add` fails loudly

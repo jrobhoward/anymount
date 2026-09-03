@@ -1,13 +1,13 @@
-//! Windows Cloud Files (cfapi) backend.
+//! Windows Cloud Files (cfapi) backend — the only Windows backend `anymount`
+//! ships. `docs/PLAN.md` (Phase 0) covers why ProjFS was evaluated and cut.
 //!
 //! # Status: Phase 0 stub
 //!
-//! [`probe`] is real and answers the central Windows spike question. [`mount`]
-//! is not implemented yet — see `docs/PLAN.md`, Phase 3.
+//! [`probe`] is real; [`mount`] is not implemented yet — see `docs/PLAN.md`,
+//! Phase 2. `CldApi.dll` ships enabled on every Windows 10 1709+ install, so
+//! there is no admin feature-enable step.
 //!
-//! Unlike ProjFS, `CldApi.dll` ships enabled on every Windows 10 1709+ install,
-//! so there is no admin feature-enable step. The open question is *sync root
-//! registration*:
+//! Sync root registration was the open question the Phase 0 spike settled:
 //!
 //! * WinRT `StorageProviderSyncRootManager::Register` is **package-identity
 //!   gated** — it needs MSIX or a sparse package. This is the path the
@@ -15,8 +15,10 @@
 //! * Win32 `CfRegisterSyncRoot` documents **no identity requirement**, only
 //!   `WRITE_DATA`/`WRITE_DAC` on the directory.
 //!
-//! Whether the Win32 path really works from an unpackaged binary is unverified
-//! in public sources, and deciding it is the point of the Windows spike.
+//! **Confirmed:** the Win32 path works from an unpackaged binary. A throwaway
+//! spike called `CfRegisterSyncRoot` directly from a plain `cargo run` binary
+//! — no MSIX, no sparse package, no app identity — and it registered and
+//! unregistered a real sync root cleanly, repeatedly.
 
 use crate::error::{FsError, Result};
 use crate::fs::ReadOnlyFs;
@@ -50,8 +52,8 @@ pub fn probe() -> Option<PlatformInfo> {
     // SAFETY: the binding allocates and initialises the out-parameter itself
     // and returns it by value; there is nothing for the caller to keep alive.
     //
-    // Unlike ProjFS, a load-time import of `CldApi.dll` is safe: it ships with
-    // every Windows 10 1709+ install and is not an optional feature.
+    // A load-time import of `CldApi.dll` is safe: it ships with every Windows
+    // 10 1709+ install and is not an optional feature.
     let info = unsafe { CfGetPlatformInfo() }.ok()?;
     Some(PlatformInfo {
         build: info.BuildNumber,
@@ -67,6 +69,6 @@ pub(crate) fn mount<F: ReadOnlyFs>(_builder: MountBuilder, _fs: F) -> Result<CfA
         ));
     }
     Err(FsError::Unsupported(
-        "the cfapi backend is not implemented yet (Phase 3)",
+        "the cfapi backend is not implemented yet (Phase 2)",
     ))
 }

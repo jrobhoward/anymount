@@ -18,21 +18,23 @@ mount.unmount()?;
 |----|-----------|----------------|
 | Linux | FUSE via `fusermount3` | `apt install fuse3`; **mounts unprivileged** |
 | macOS | FUSE via macFUSE | macFUSE; 5.2+ on macOS 15.4+ needs no kernel extension |
-| Windows | ProjFS *or* Cloud Files (cfapi) | ProjFS: one admin feature-enable. cfapi: none |
+| Windows | Cloud Files (cfapi) | none |
 
-Both Windows backends project into a directory, not a drive letter.
+The Windows backend projects into a directory, not a drive letter. ProjFS was
+evaluated and cut entirely, not kept as a fallback — see
+[`docs/GAPS.md`](docs/GAPS.md).
 
 ## Status
 
 **Phase 0 — spikes.** The FUSE backend works end to end on Linux. The Windows
-and macOS paths are being brought up in that order. See [`docs/PLAN.md`](docs/PLAN.md).
+spike confirmed cfapi meets v1's needs unpackaged; macOS is next. See
+[`docs/PLAN.md`](docs/PLAN.md).
 
 | Backend | State |
 |---------|-------|
 | FUSE (Linux) | working — mounts, reads, random access, clean unmount |
 | FUSE (macOS) | untested; same code path as Linux |
-| ProjFS | `probe()` implemented; `mount()` is a stub |
-| cfapi | `probe()` implemented; `mount()` is a stub |
+| cfapi | `probe()` implemented and confirmed working unpackaged; `mount()` is a stub |
 
 ## Why not just use an existing crate?
 

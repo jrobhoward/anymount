@@ -6,21 +6,21 @@ Kept honest so downstream users hit no surprises.
 ## Read-only
 
 Write operations report `EROFS`. The first consumer restores from immutable
-backup snapshots, and ProjFS [cannot intercept writes at
-all](https://github.com/microsoft/ProjFS-Managed-API/issues/30), so a
-cross-platform write story would be uneven from the start.
+backup snapshots, so nothing in v1 needs writes. [ProjFS cannot intercept
+writes at all](https://github.com/microsoft/ProjFS-Managed-API/issues/30) —
+one of the reasons it was cut rather than kept as a fallback (see below) — so
+a cross-platform write story would have been uneven from the start anyway.
 
-*To change:* add write ops to `ReadOnlyFs` (or a `ReadWriteFs` supertrait) and
-accept that ProjFS cannot implement them. Windows write support realistically
-means WinFsp, which reintroduces GPLv3 — see below.
+*To change:* add write ops to `ReadOnlyFs` (or a `ReadWriteFs` supertrait).
+cfapi has a real callback path for writes; Windows write support beyond that
+realistically means WinFsp, which reintroduces GPLv3 — see below.
 
 ## No symlinks or hardlinks
 
-`FileKind` has only `File` and `Directory`. ciphercask skips symlinks at backup
-time, and neither ProjFS nor cfapi models them the way FUSE does.
+`FileKind` has only `File` and `Directory`. ciphercask skips symlinks at
+backup time, and cfapi does not model them the way FUSE does.
 
-*To change:* add `FileKind::Symlink` plus a `readlink` op; ProjFS has partial
-support via symlink placeholders, but those require NTFS and error on ReFS.
+*To change:* add `FileKind::Symlink` plus a `readlink` op.
 
 ## Directory metadata is synthesised
 
@@ -38,42 +38,57 @@ record *plaintext* chunk lengths cannot seek: it must decode from byte 0. The
 recommended workaround is materialise-on-open — restore the whole file to a
 cache directory on `open`, then serve reads from it.
 
-This costs less than it sounds, because **ProjFS and cfapi call `read_at`
-sequentially during hydration** — they materialise whole files anyway. Only the
-FUSE path issues random reads.
+This costs less than it sounds, because **cfapi calls `read_at` sequentially
+during hydration** — it materialises whole files anyway. Only the FUSE path
+issues random reads.
 
 *To change:* the archive format must record plaintext chunk offsets. The trait
 does not change when it does.
 
 ## Windows: a directory, not a drive letter
 
-Both ProjFS and cfapi project into a directory under a virtualisation root.
-Neither can assign `X:`.
+cfapi projects into a directory under a virtualisation root and cannot assign
+`X:`.
 
 *To change:* WinFsp is the only Windows option that mounts a real volume — and
 it is GPLv3 with a paid commercial license. It would have to live in a separate,
 opt-in `anymount-winfsp` crate so it never enters a default dependency graph.
 
-## Windows: ProjFS hydration consumes disk
+## Windows: cfapi only — ProjFS was evaluated and cut, not deferred
 
-Reading a file through ProjFS materialises it on local disk, with no automatic
-eviction. Browsing a very large archive can fill the volume.
+`anymount` has exactly one Windows backend: cfapi. There is no `projfs`
+feature, no `Backend::ProjFs`, and no ProjFS code in the tree.
 
-*Mitigated by:* using cfapi instead, whose `STREAMING_ALLOWED` policy avoids
-persisting fetched data and whose `AUTO_DEHYDRATION_ALLOWED` lets Windows
-Storage Sense reclaim space.
+This was a deliberate call made in the Phase 0 spike (`docs/PLAN.md`), not an
+oversight or a placeholder for later. ProjFS was checked for a capability
+cfapi lacks and none was found for this crate's scope: ProjFS cannot intercept
+writes at all (moot for a read-only crate anyway), both backends hydrate
+through the same NTFS reparse-point/minifilter mechanism so `mmap` would not
+have been differentiated, and both fetch callbacks
+(`PrjGetFileDataCallback` / `CF_CALLBACK_TYPE_FETCH_DATA`) take an
+offset/length, so neither would have been uniquely capable of ranged reads.
+Meanwhile ProjFS carried two real costs cfapi doesn't:
 
-## Windows: ProjFS needs an admin feature-enable
+- Reading a file through ProjFS materialises it on local disk with no
+  automatic eviction; browsing a large archive can fill the volume. cfapi's
+  `STREAMING_ALLOWED` policy avoids persisting fetched data, and
+  `AUTO_DEHYDRATION_ALLOWED` lets Windows Storage Sense reclaim space.
+- ProjFS needs a one-time admin step,
+  `Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart`.
+  cfapi needs none — `CldApi.dll` ships enabled on every Windows 10 1709+
+  install, confirmed via `CfGetPlatformInfo` in the Phase 0 spike, and
+  `CfRegisterSyncRoot` was confirmed to register a sync root from an
+  unpackaged binary.
 
-`Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart`,
-once per machine. No reboot. cfapi has no such step.
-
-Because that feature is off by default, `ProjectedFSLib.dll` is frequently
-absent, and a load-time import of a `Prj*` symbol would prevent the *entire
-binary* from starting rather than yielding a catchable error. `anymount` never
-references those symbols statically and probes with `LoadLibraryW`; any code
-added to the ProjFS backend must resolve entry points dynamically to preserve
-that.
+*To change:* this would mean re-adding a Windows backend from scratch, not
+restoring a stub — there is nothing here to un-comment. It would only be worth
+doing given a concrete environment where cfapi genuinely fails. If that
+happens, the constraint that made this hard the first time still applies:
+`ProjectedFSLib.dll` only exists once `Client-ProjFS` is enabled — off by
+default — so a load-time import of a `Prj*` symbol would prevent the *entire
+binary* from starting rather than yielding a catchable error. Any new ProjFS
+code must resolve entry points dynamically (`GetProcAddress` or
+delay-loading), never link them statically.
 
 ## macOS: no native FSKit backend
 

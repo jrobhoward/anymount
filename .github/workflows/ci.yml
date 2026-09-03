@@ -43,7 +43,7 @@ jobs:
 
       # Reports which backends this runner can actually use. Informational: it
       # must not fail the build, since hosted runners cannot approve a macOS
-      # kernel extension or enable a Windows optional feature.
+      # kernel extension.
       - name: Backend probe
         run: cargo run --example probe
         continue-on-error: true
@@ -81,9 +81,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc, aarch64-apple-darwin
-      # `check` needs no linker, so the Windows backends (ProjFS, cfapi) are
-      # type checked on every push without waiting for a Windows runner.
-      - name: Check Windows backends
+      # `check` needs no linker, so the Windows backend (cfapi) is type
+      # checked on every push without waiting for a Windows runner.
+      - name: Check Windows backend
         run: cargo check --target x86_64-pc-windows-msvc
 
       # macOS can only be checked without default features: `fuser`'s build

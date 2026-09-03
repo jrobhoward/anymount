@@ -15,8 +15,6 @@ pub enum Backend {
     Auto,
     /// FUSE. Linux and macOS (via macFUSE).
     Fuse,
-    /// Windows Projected File System.
-    ProjFs,
     /// Windows Cloud Files API.
     CfApi,
 }
@@ -35,8 +33,8 @@ impl MountBuilder {
     /// Start configuring a mount at `mountpoint`.
     ///
     /// On Unix this is a directory that must already exist. On Windows it is the
-    /// virtualisation root; both Windows backends project into a directory
-    /// rather than assigning a drive letter.
+    /// virtualisation root; cfapi projects into a directory rather than
+    /// assigning a drive letter.
     pub fn new(mountpoint: impl AsRef<Path>) -> Self {
         Self {
             mountpoint: mountpoint.as_ref().to_path_buf(),

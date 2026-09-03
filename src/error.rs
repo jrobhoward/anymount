@@ -5,8 +5,8 @@ use std::io;
 /// Failure of a filesystem operation.
 ///
 /// Variants are chosen to map cleanly onto both `errno` (FUSE) and
-/// `HRESULT`/`NTSTATUS` (ProjFS, cfapi), so an implementor never has to know
-/// which backend is mounted.
+/// `HRESULT`/`NTSTATUS` (cfapi), so an implementor never has to know which
+/// backend is mounted.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum FsError {

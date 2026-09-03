@@ -30,9 +30,9 @@ graph**, matching the `deny.toml` allow-list already used in `bgrt`.
   chunks vary in size. `get_chunk_stored_size()` returns the *compressed*
   size → v1 uses **materialise-on-open**.
 - **WinFsp, macFUSE's framework/kext, Dokany and `windows-projfs` are copyleft
-  or proprietary.** ProjFS and cfapi through Microsoft's own `windows` crate are
-  MIT/Apache. FSKit is unusable from Rust (Swift-only entry point, Xcode-built
-  `.appex`, block-device filesystems only).
+  or proprietary.** cfapi through Microsoft's own `windows` crate is MIT/Apache.
+  FSKit is unusable from Rust (Swift-only entry point, Xcode-built `.appex`,
+  block-device filesystems only).
 
 ## Decisions
 
@@ -43,7 +43,7 @@ graph**, matching the `deny.toml` allow-list already used in `bgrt`.
 | Structure | **Single crate.** See below |
 | Async | **Sync-only** |
 | v1 scope | **Read-only.** Write ops return `EROFS`; gaps in `GAPS.md` |
-| Windows | cfapi preferred, ProjFS fallback; **WinFsp excluded entirely** |
+| Windows | **cfapi only.** ProjFS evaluated and cut entirely — not planned; **WinFsp excluded entirely** |
 | Edition / MSRV | edition 2024, `rust-version = "1.88.0"` |
 
 ### Why one crate, not a `-core` split
@@ -78,22 +78,51 @@ requested without `allow_other`.
 
 Cross-compilation status, checked from Linux: the Windows target (`cargo check
 --target x86_64-pc-windows-msvc`) type checks clean including clippy, so the
-ProjFS and cfapi stubs are known-good before touching a Windows box. macOS can
-only be checked with `--no-default-features`, because `fuser`'s build script
-calls pkg-config for libfuse and that needs a macOS sysroot; the `macos-latest`
-CI runner covers the real thing.
+cfapi stub was known-good before touching a Windows box. macOS can only be
+checked with `--no-default-features`, because `fuser`'s build script calls
+pkg-config for libfuse and that needs a macOS sysroot; the `macos-latest` CI
+runner covers the real thing.
 
-**Windows — next.** Two questions:
-1. Does the crate build against the `windows` crate, and does `probe()` find
-   ProjFS and cfapi?
-2. **Can Win32 `CfRegisterSyncRoot` register a sync root from an unpackaged
-   binary?** Its docs state no package-identity requirement (only `WRITE_DATA`/
-   `WRITE_DAC`), whereas the WinRT `StorageProviderSyncRootManager` path used by
-   the `cloud-filter` crate *is* identity-gated. Public sources conflate the two;
-   nobody has confirmed the Win32 path unpackaged.
-   - **Pass** → cfapi is the Windows default; ProjFS becomes secondary.
-   - **Fail** → ProjFS is the CLI default; cfapi stays for the GUI, which ships
-     an installer and can carry a sparse package.
+**Windows — done.** Both questions resolved on a Windows 11 (build 26100)
+unpackaged dev machine:
+
+1. **Builds clean.** `cargo build --all-targets`, `cargo clippy --all-targets
+   -- -Dwarnings`, `cargo fmt --all -- --check`, `cargo test`, and `cargo deny
+   check licenses bans sources` all pass against `windows = "0.62"` with no
+   changes needed. `cargo run --example probe` reports cfapi **available**,
+   platform build 26100.8875, integration `0x628` — comfortably above the
+   `0x310` floor `cfapi.rs` documents for unrestricted placeholder-management
+   policies. (ProjFS was probed too, before it was cut — see below — and
+   correctly reported unavailable: `Client-ProjFS` is off by default on a
+   fresh machine, and `LoadLibraryW("ProjectedFSLib.dll")` failed as expected
+   rather than crashing the process, confirming the dynamic-resolution
+   strategy worked while it was in the tree.)
+2. **`CfRegisterSyncRoot` works unpackaged.** A throwaway spike (built, run
+   three times, then deleted — not part of the crate) called
+   `CfRegisterSyncRoot` directly on a plain `cargo run` binary with no MSIX, no
+   sparse package, and no app identity, registering a real sync root on a temp
+   directory and unregistering it cleanly each time. The Win32 docs' claim of
+   no package-identity requirement holds in practice, resolving the ambiguity
+   with the WinRT `StorageProviderSyncRootManager` path (which *is*
+   identity-gated and was correctly avoided).
+
+   **Result: cfapi meets v1's Windows needs on its own, and ProjFS is cut
+   entirely — not deferred, not an opt-in feature.** Checked for a genuine
+   ProjFS capability advantage first and found none: ProjFS cannot intercept
+   writes at all (cfapi at least has a callback path there, moot for v1's
+   read-only scope either way — see `docs/GAPS.md`), both backends hydrate
+   placeholder files through the same NTFS reparse-point/minifilter mechanism
+   so `mmap` behaves the same on either, and both fetch callbacks
+   (`PrjGetFileDataCallback` / `CF_CALLBACK_TYPE_FETCH_DATA`) receive an offset
+   and length, so neither is uniquely capable of ranged reads. Every real
+   difference (admin feature-enable, disk-filling hydration with no
+   auto-eviction) favors cfapi, so there is no case left for carrying a second
+   Windows backend. `src/backend/projfs.rs`, the `projfs` feature, the
+   `Backend::ProjFs` variant, and the ProjFS-only `windows` crate features
+   (`Win32_Storage_ProjectedFileSystem`, `Win32_System_LibraryLoader`) are all
+   removed. If an environment ever turns up where cfapi genuinely doesn't
+   work, that is a reason to re-add ProjFS from scratch with real evidence in
+   hand, not a reason to have kept a stub around on spec.
 
 **macOS — last.** Same FUSE code path as Linux. Confirm macFUSE resolves the
 libfuse path, and that macFUSE 5.2+ on macOS 15.4+ mounts without a kext.
@@ -103,25 +132,14 @@ libfuse path, and that macFUSE 5.2+ on macOS 15.4+ mounts without a kext.
 Inode/handle lifetime rules, `forget` handling, xattr plumbing, `statfs`.
 Property tests over the readdir cookie arithmetic.
 
-### Phase 2 — Windows backends
+### Phase 2 — Windows backend
 
-Both against the `windows` crate directly. cfapi: `PopulationType::Partial` for
-on-demand enumeration, `STREAMING_ALLOWED` to avoid persisting data,
-`AUTO_DEHYDRATION_ALLOWED` for reclamation. ProjFS: `PrjStartVirtualizing` plus
-enumeration and `PrjGetFileDataCallback`.
+**cfapi**, the only Windows backend, against the `windows` crate directly:
+`PopulationType::Partial` for on-demand enumeration, `STREAMING_ALLOWED` to
+avoid persisting data, `AUTO_DEHYDRATION_ALLOWED` for reclamation.
 
-**Hard constraint discovered in Phase 0: ProjFS entry points must be resolved
-dynamically.** `ProjectedFSLib.dll` only exists once the `Client-ProjFS`
-optional feature is enabled, and that feature is **off by default**. A
-load-time import of any `Prj*` symbol therefore stops the whole process from
-starting on a machine without it — the loader fails before `main`, so there is
-no chance to report a friendly error, and `probe()` could never return `false`.
-
-`src/backend/projfs.rs` consequently makes **no static reference to any `Prj*`
-symbol**, and probes with `LoadLibraryW` instead. Phase 2 must preserve that:
-resolve every ProjFS function through `GetProcAddress` or delay-loading. cfapi
-needs no such care — `CldApi.dll` ships with every Windows 10 1709+ install and
-is not optional.
+ProjFS is not part of this crate — see the Windows spike result above for why
+it was cut rather than kept as a fallback.
 
 ### Phase 3 — ciphercask integration (separate repo)
 
@@ -143,14 +161,13 @@ A `CaskFs` implementing `ReadOnlyFs`:
 |---|---|---|
 | `fuse` | yes | FUSE backend. Dependency is `cfg(unix)`-scoped |
 | `cfapi` | yes | Cloud Files backend. Dependency is `cfg(windows)`-scoped |
-| `projfs` | yes | ProjFS backend. Dependency is `cfg(windows)`-scoped |
 | `tracing` | no | Per-operation spans |
 
-Cargo cannot express per-OS defaults, so all three ship in `default` and compile
-to nothing off-platform; because the dependencies live under
+Cargo cannot express per-OS defaults, so `fuse` and `cfapi` ship in `default`
+and compile to nothing off-platform; because the dependencies live under
 `[target.'cfg(...)'.dependencies]`, a Linux build never fetches `windows`.
 
-Deliberately absent: any `winfsp` or `async` feature.
+Deliberately absent: any `winfsp`, `projfs`, or `async` feature.
 
 ## Deferred
 
@@ -179,5 +196,3 @@ Per platform, verify with real tools rather than trusting process output:
    computed independently.
 4. Confirm clean unmount leaves no stale entry in `mount`.
 5. Linux: confirm the mount is unprivileged.
-6. Windows: confirm ProjFS returns an actionable error when `Client-ProjFS` is
-   disabled, rather than an opaque `HRESULT`.

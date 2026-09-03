@@ -36,18 +36,6 @@ fn main() {
         println!("  requires macFUSE: https://macfuse.io (5.2+ avoids the kernel extension)");
     }
 
-    #[cfg(all(windows, feature = "projfs"))]
-    {
-        let ok = anymount::probe::projfs();
-        println!("\nProjFS available: {ok}");
-        if !ok {
-            println!(
-                "  hint: Enable-WindowsOptionalFeature -Online \
-                 -FeatureName Client-ProjFS -NoRestart  (admin, no reboot)"
-            );
-        }
-    }
-
     #[cfg(all(windows, feature = "cfapi"))]
     {
         match anymount::probe::cfapi() {

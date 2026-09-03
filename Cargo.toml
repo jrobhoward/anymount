@@ -5,20 +5,18 @@ edition = "2024"
 rust-version = "1.88.0"
 license = "MIT OR Apache-2.0"
 authors = ["James Howard <jrobhoward@gmail.com>"]
-description = "Cross-platform read-only userspace filesystems: FUSE on Linux and macOS, ProjFS or Cloud Files on Windows"
+description = "Cross-platform read-only userspace filesystems: FUSE on Linux and macOS, Cloud Files on Windows"
 repository = "https://github.com/jrobhoward/anymount"
 homepage = "https://github.com/jrobhoward/anymount"
-keywords = ["filesystem", "fuse", "projfs", "mount", "userspace"]
+keywords = ["filesystem", "fuse", "cfapi", "mount", "userspace"]
 categories = ["filesystem", "os"]
 readme = "README.md"
 
 [features]
-default = ["fuse", "projfs", "cfapi"]
+default = ["fuse", "cfapi"]
 
 # FUSE backend (Linux, macOS). Inert on Windows.
 fuse = ["dep:fuser"]
-# Windows Projected File System backend. Inert off Windows.
-projfs = ["dep:windows"]
 # Windows Cloud Files (cfapi) backend. Inert off Windows.
 cfapi = ["dep:windows"]
 # Per-operation tracing spans.
@@ -44,11 +42,9 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
-    "Win32_Storage_ProjectedFileSystem",
     "Win32_Storage_CloudFilters",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
-    "Win32_System_LibraryLoader",
 ] }
 
 [lints.clippy]
