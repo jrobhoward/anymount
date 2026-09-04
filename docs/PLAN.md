@@ -701,48 +701,99 @@ Property tests over the readdir cookie arithmetic.
 ### Phase 2 — Windows backend
 
 **Current state:** `src/backend/cfapi.rs`'s `mount()` is a hard stub — it
-checks `probe()` and returns `FsError::Unsupported`, nothing else. Everything
-confirmed so far is registration-only: `CfRegisterSyncRoot` works unpackaged
-(Phase 0, above). **No fetch callback has ever fired, and no byte of file
-content has ever been served through a cfapi mount.** That gap is larger than
-anything left on macOS or Linux and should be closed before writing the real
-backend, the same way NFS's open questions were closed by spiking before
-committing to `backend/nfs.rs`'s design. In priority order:
+checks `probe()` and returns `FsError::Unsupported`, nothing else. Registration
+was confirmed working in Phase 0. All four items below are now spiked and
+answered with real evidence, the same way NFS's open questions were closed
+before committing to `backend/nfs.rs`'s design.
 
-1. **Fetch-callback correctness — completely unverified, the single biggest
-   open question in the whole project right now.** Register a sync root
-   (already confirmed working), create one placeholder file backed by known
-   content, then actually open and read it through a normal file API or
-   Explorer and confirm `CF_CALLBACK_TYPE_FETCH_DATA` fires with a sane
-   offset/length and that the bytes returned are correct — verified the way
-   every other backend has been: a checksum taken through the mount matching
-   one computed independently, not just "the callback fired."
-2. **The sequential-read assumption this crate's whole materialise-on-open
-   design leans on — asserted in `docs/GAPS.md`, never actually measured.**
-   `docs/GAPS.md`'s "No random-access streaming from chunked archives"
-   section states cfapi calls `read_at` sequentially during hydration; none
-   of Phase 0's Windows spike tested this empirically. Confirm: does the
-   fetch callback ever request a non-zero starting offset or an
-   out-of-order range, or is hydration genuinely guaranteed sequential from
-   byte 0? If it isn't as guaranteed as assumed, the materialise-on-open
-   story needs rethinking before implementation, not after.
-3. **Directory enumeration correctness and scale.** `PopulationType::Partial`
-   needs its own end-to-end check, not just a design intent: does listing a
-   directory in Explorer correctly trigger on-demand enumeration, for both a
-   small directory and a large one (mirror the NFS spike's 3000-entry test)?
-   Is there a per-callback size/count limit analogous to NFS's `READDIR`
-   `maxcount` that needs real budget-respecting logic — the NFS spike's first
-   attempt at this *looked* correct under a casual test and was actually
-   wrong (see Phase 0.6) — or does cfapi's callback shape sidestep that
-   failure mode entirely? Don't assume either way; check.
-4. **Crash/lifecycle behavior — the cfapi analogue of the NFS finding
-   above.** What happens if the process serving fetch callbacks dies while
-   Explorer has a placeholder open or mid-hydration — does Explorer hang
-   indefinitely the way a "hard" NFS mount did, or does cfapi/NTFS recover on
-   its own? Is there a cfapi-level equivalent of NFS's `soft`/`timeo` (a
-   documented flag or default behavior worth relying on, or something this
-   backend needs to configure explicitly)? Untested; don't assume it's fine
-   because the mechanism is different from NFS.
+1. **Fetch-callback correctness — spiked, and it works.** A throwaway spike
+   (built, run, then deleted — not part of the crate, same convention as every
+   other Phase 0/0.5/0.6 spike) registered a sync root, created a placeholder
+   file backed by 5 MiB of deterministic content via `CfCreatePlaceholders`,
+   then opened and read it through a normal `std::fs::File`.
+   `CF_CALLBACK_TYPE_FETCH_DATA` fired with `RequiredFileOffset=0`,
+   `RequiredLength=5242880` (the whole file), `CfExecute` with
+   `CF_OPERATION_TYPE_TRANSFER_DATA` delivered the bytes, and a SHA-256 of the
+   read-back content matched one computed independently. One real gotcha hit
+   along the way: `CfCreatePlaceholders` fails with
+   `ERROR_CLOUD_FILE_INVALID_REQUEST` (`0x8007017C`) unless `FileIdentity` is
+   set to a non-null, non-zero-length buffer — the docs call it "mandatory for
+   files," and the failure mode gives no hint that this specific field is the
+   problem.
+2. **The sequential-read assumption — spiked, and the real answer is stronger
+   than what was assumed: cfapi does not do ranged reads at all, it hydrates
+   the whole file unconditionally on first touch.** Three variants were tried
+   against a never-before-touched placeholder, seeking straight to a 4 MiB
+   offset and reading only 4 KiB, without ever touching byte 0 first:
+   buffered `std::fs::File` with `CF_HYDRATION_POLICY_PARTIAL`, the same with
+   `CF_HYDRATION_POLICY_PROGRESSIVE`, and unbuffered `CreateFileW` with
+   `FILE_FLAG_NO_BUFFERING` and a sector-aligned offset/length (removing the
+   NTFS cache manager's own read-ahead as a possible explanation). All three
+   produced the identical single `FETCH_DATA` call: offset 0, length equal to
+   the whole file. Neither hydration policy nor bypassing buffered I/O changed
+   this. **Consequence: this is not "cfapi happens to hydrate sequentially,"
+   it is "cfapi has no partial/ranged fetch path a caller can reach through
+   ordinary file I/O" — `docs/GAPS.md`'s materialise-on-open recommendation
+   was already the right call, and this closes the question rather than
+   just confirming a milder version of it.**
+3. **Directory enumeration correctness and scale — spiked, works, and surfaced
+   a Rust-specific test-tooling gotcha.** A placeholder directory
+   (`CF_PLACEHOLDER_CREATE_INFO` with `FILE_ATTRIBUTE_DIRECTORY`, no
+   `CF_PLACEHOLDER_CREATE_FLAG_DISABLE_ON_DEMAND_POPULATION`, confirmed
+   afterward to carry `FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_OFFLINE |
+   FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`) was populated with 3000 synthetic
+   children by returning `CF_OPERATION_TYPE_TRANSFER_PLACEHOLDERS` from a
+   `CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS` handler. Unlike NFS's `READDIR`,
+   `CF_CALLBACK_PARAMETERS`'s `FetchPlaceholders` variant carries no
+   count/size budget field at all (only `Flags` and a wildcard `Pattern`), and
+   a single `CfExecute` call handed back all 3000 entries in one shot with no
+   truncation or error — **cfapi's callback shape genuinely sidesteps the
+   size-budget failure mode that NFS's first `READDIR` attempt fell into (see
+   Phase 0.6)**, at least at this scale. Verified with real tools: `cmd`'s
+   `dir` and PowerShell's `Get-ChildItem`, run against the mount from a
+   separate process while the sync-provider process was deliberately kept
+   alive and sleeping, both listed all 3000 children correctly. **The gotcha:
+   `std::fs::read_dir` on the same path, from the same process, immediately
+   returned zero entries without ever invoking `FETCH_PLACEHOLDERS` at all** —
+   confirmed by checking the callback invocation count directly, not just the
+   returned list. Whatever directory-query mechanism Rust's standard library
+   uses on Windows does not trigger cfapi's on-demand population the way
+   `FindFirstFileW`-based tools (`dir`, `Get-ChildItem`, and by extension
+   Explorer) do. Root cause not tracked down further — not needed to answer
+   the question this spike was for — but this matters directly for
+   `anymount`'s own test suite: **a future integration test that verifies
+   cfapi directory listing must not rely on `std::fs::read_dir`** to check
+   the result; shelling out to `dir`, or a raw `FindFirstFileW` binding, is
+   needed instead, the same "verify with real tools" bar the top of this file
+   already asks for, but now with a concrete trap identified.
+4. **Crash/lifecycle behavior — spiked, and cfapi recovers well on its own, no
+   `soft`/`timeo`-equivalent configuration needed.** Two throwaway binaries (a
+   `server` registering a sync root and a `client` opening and blocking-reading
+   the placeholder it created — built, run, then deleted, same convention as
+   every other spike here) reproduced a crash mid-hydration directly: the
+   server's `FETCH_DATA` callback deliberately slept 20 seconds without ever
+   calling `CfExecute`, and partway through that sleep — with the client's
+   `File::open`+`read_to_end` genuinely blocked waiting on it — the server
+   process was killed with `taskkill /F` (a hard kill, not a clean shutdown).
+   **The client's blocked read unblocked on its own after 12.08 seconds**,
+   failing with a specific, actionable error:
+   `ERROR_CLOUD_FILE_PROVIDER_TERMINATED` ("The cloud file provider exited
+   unexpectedly," os error 404) — not a generic timeout or an indefinite hang.
+   12 seconds is well under the `CF_CALLBACK_TYPE` docs' fixed 60-second
+   per-callback timeout, suggesting cfapi/NTFS detects the dead process
+   directly (likely via the closed connection handle) rather than waiting out
+   the callback timeout — plausibly a bounded grace period in case a
+   replacement provider process reconnects to the same sync root, though that
+   reconnect path itself wasn't tested. Also checked: after the crash, a
+   **fresh process re-registering the same sync root path succeeded cleanly**
+   (`CfRegisterSyncRoot` and `CfConnectSyncRoot` both succeeded, a new
+   placeholder was created normally) — a crashed provider does not leave the
+   sync root permanently wedged. **Consequence: `backend/cfapi.rs` needs no
+   NFS-style `soft`/`timeo` configuration or equivalent — cfapi's own
+   12-second recovery window is already bounded and requires no human
+   intervention, unlike NFS's default "hard" mount (Phase 0.6), and restart
+   after a crash is a clean re-register, not a stale-state cleanup problem.**
+   This closes Phase 2's spike list; all four items now have real answers.
 
 Once 1–4 have real answers: build `CfApiHandle`/`mount()` for real against the
 `windows` crate directly — `PopulationType::Partial` for on-demand

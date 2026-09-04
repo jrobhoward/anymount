@@ -38,9 +38,15 @@ record *plaintext* chunk lengths cannot seek: it must decode from byte 0. The
 recommended workaround is materialise-on-open — restore the whole file to a
 cache directory on `open`, then serve reads from it.
 
-This costs less than it sounds, because **cfapi calls `read_at` sequentially
-during hydration** — it materialises whole files anyway. Only the FUSE path
-issues random reads.
+This costs less than it sounds, because **cfapi has no ranged-read path at
+all: it fetches the entire file on first touch, unconditionally** — it
+materialises whole files anyway. Confirmed empirically (`docs/PLAN.md` Phase
+2, item 2): seeking straight to a 4 MiB offset in a never-touched placeholder
+and reading 4 KiB, without ever reading byte 0, still produced a single
+`CF_CALLBACK_TYPE_FETCH_DATA` call for the whole file — reproduced across
+`CF_HYDRATION_POLICY_PARTIAL`, `CF_HYDRATION_POLICY_PROGRESSIVE`, and
+unbuffered sector-aligned I/O, so neither hydration policy nor the NTFS cache
+manager's own read-ahead explains it. Only the FUSE path issues random reads.
 
 *To change:* the archive format must record plaintext chunk offsets. The trait
 does not change when it does.
