@@ -700,9 +700,57 @@ Property tests over the readdir cookie arithmetic.
 
 ### Phase 2 — Windows backend
 
-**cfapi**, the only Windows backend, against the `windows` crate directly:
-`PopulationType::Partial` for on-demand enumeration, `STREAMING_ALLOWED` to
-avoid persisting data, `AUTO_DEHYDRATION_ALLOWED` for reclamation.
+**Current state:** `src/backend/cfapi.rs`'s `mount()` is a hard stub — it
+checks `probe()` and returns `FsError::Unsupported`, nothing else. Everything
+confirmed so far is registration-only: `CfRegisterSyncRoot` works unpackaged
+(Phase 0, above). **No fetch callback has ever fired, and no byte of file
+content has ever been served through a cfapi mount.** That gap is larger than
+anything left on macOS or Linux and should be closed before writing the real
+backend, the same way NFS's open questions were closed by spiking before
+committing to `backend/nfs.rs`'s design. In priority order:
+
+1. **Fetch-callback correctness — completely unverified, the single biggest
+   open question in the whole project right now.** Register a sync root
+   (already confirmed working), create one placeholder file backed by known
+   content, then actually open and read it through a normal file API or
+   Explorer and confirm `CF_CALLBACK_TYPE_FETCH_DATA` fires with a sane
+   offset/length and that the bytes returned are correct — verified the way
+   every other backend has been: a checksum taken through the mount matching
+   one computed independently, not just "the callback fired."
+2. **The sequential-read assumption this crate's whole materialise-on-open
+   design leans on — asserted in `docs/GAPS.md`, never actually measured.**
+   `docs/GAPS.md`'s "No random-access streaming from chunked archives"
+   section states cfapi calls `read_at` sequentially during hydration; none
+   of Phase 0's Windows spike tested this empirically. Confirm: does the
+   fetch callback ever request a non-zero starting offset or an
+   out-of-order range, or is hydration genuinely guaranteed sequential from
+   byte 0? If it isn't as guaranteed as assumed, the materialise-on-open
+   story needs rethinking before implementation, not after.
+3. **Directory enumeration correctness and scale.** `PopulationType::Partial`
+   needs its own end-to-end check, not just a design intent: does listing a
+   directory in Explorer correctly trigger on-demand enumeration, for both a
+   small directory and a large one (mirror the NFS spike's 3000-entry test)?
+   Is there a per-callback size/count limit analogous to NFS's `READDIR`
+   `maxcount` that needs real budget-respecting logic — the NFS spike's first
+   attempt at this *looked* correct under a casual test and was actually
+   wrong (see Phase 0.6) — or does cfapi's callback shape sidestep that
+   failure mode entirely? Don't assume either way; check.
+4. **Crash/lifecycle behavior — the cfapi analogue of the NFS finding
+   above.** What happens if the process serving fetch callbacks dies while
+   Explorer has a placeholder open or mid-hydration — does Explorer hang
+   indefinitely the way a "hard" NFS mount did, or does cfapi/NTFS recover on
+   its own? Is there a cfapi-level equivalent of NFS's `soft`/`timeo` (a
+   documented flag or default behavior worth relying on, or something this
+   backend needs to configure explicitly)? Untested; don't assume it's fine
+   because the mechanism is different from NFS.
+
+Once 1–4 have real answers: build `CfApiHandle`/`mount()` for real against the
+`windows` crate directly — `PopulationType::Partial` for on-demand
+enumeration, `STREAMING_ALLOWED` to avoid persisting fetched data,
+`AUTO_DEHYDRATION_ALLOWED` for reclamation — and verify with the same bar
+every other backend has met: `dir`/`ls`, `type`/`cat`, a checksum through the
+mount matching one computed independently, and confirmation that
+`CfUnregisterSyncRoot` leaves no orphaned sync root behind.
 
 ProjFS is not part of this crate — see the Windows spike result above for why
 it was cut rather than kept as a fallback.
