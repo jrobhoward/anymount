@@ -59,6 +59,12 @@ cargo check --target aarch64-apple-darwin
 # Supply chain — run before adding or updating any dependency
 cargo deny check licenses bans sources
 
+# MSRV — pin to the exact floor `rust-version` in Cargo.toml declares. Needs
+# `rustup toolchain install 1.88.0` once; `cargo clippy --all-targets` alone
+# uses whatever toolchain is active and will not catch API usage newer than
+# the floor.
+cargo +1.88.0 check --all-targets
+
 # Examples. `probe` needs no mountpoint and no privileges; run it first on a
 # new machine to see which backends are actually available.
 cargo run --example probe
@@ -171,12 +177,40 @@ platform-specific tests are `cfg`-gated too. **CI is where Windows and macOS
 code actually executes.** The cross-compile commands above are the local
 pre-push check: they prove the other backends type-check, not that they work.
 Run them before calling a change done, review FFI carefully, and expect CI to be
-the real verdict.
+the real verdict. For code that is not backend-specific FFI but still needs a
+Unix/non-Unix split — `types.rs`'s `current_uid`/`current_gid`, `error.rs`'s
+`to_errno` — use a pair of `#[cfg(unix)]` / `#[cfg(not(unix))]` functions of
+the same name and signature, not an inline `cfg!` branch.
 
 **Verify mounts with real tools, not process output.** A backend that prints
 "mounted" has proved nothing. Check `mount`, then `ls -lR`, `cat`, `stat`, and a
 `sha256sum` compared against a digest computed independently of the mount. The
 `mount-smoke-test` CI job does exactly this and is the template.
+
+**Property tests:** reach for `proptest` (dev-dependency) when a pure function
+has a round-trip or arithmetic invariant worth checking across many inputs, not
+just a couple of hand-picked examples — `backend/fuse_tests.rs`'s `cookie`
+module tests (readdir cookie encode/decode, and a simulated multi-call
+pagination) are the template. Don't reach for it for ordinary example-based
+behavior; a `subject____condition____result` unit test is still the default.
+
+## Code Style
+
+**Prefer `use` imports over fully-qualified paths** in function bodies —
+`&FsError`, not `&crate::error::FsError`, when `FsError` is already imported at
+the top of the file. The one deliberate exception is `backend/fuse.rs`, which
+writes `fuser::FileHandle`/`fuser::FileType` fully-qualified throughout: `fuser`
+has its own `FileHandle`, which collides with `crate::types::FileHandle` if
+both are in scope unqualified. Don't add a `use fuser::FileHandle` there to
+"clean it up" — that reintroduces the collision.
+
+**Never set `RUSTFLAGS=-Dwarnings` in the CI environment** (or any shared
+`env:` block). It applies to *dependency* compilation too — `fuser`, `windows`,
+`proptest`, and their transitive trees — so a new stable rustc that adds one
+warning anywhere in that graph reds every job with no anymount changes. Pass
+`-Dwarnings` to `cargo clippy` explicitly instead (as every job in
+`.github/workflows/ci.yml` already does), which scopes the deny to this crate
+only.
 
 ## Definition of Done
 
@@ -187,6 +221,7 @@ Before considering any task or phase complete:
 - `cargo fmt --all -- --check` is clean
 - `cargo deny check licenses bans sources` passes
 - The two cross-compile checks pass
+- `cargo +1.88.0 check --all-targets` (MSRV) passes
 - No `.unwrap()` / `.expect()` in production code
 - New public items have doc comments
 - If behaviour changed on a platform, it was verified with real tools there, or

@@ -274,7 +274,7 @@ fn reply_xattr(data: &[u8], size: u32, reply: ReplyXattr) {
     }
 }
 
-fn errno(e: &crate::error::FsError) -> Errno {
+fn errno(e: &FsError) -> Errno {
     Errno::from_i32(e.to_errno())
 }
 

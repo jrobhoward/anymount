@@ -1,3 +1,5 @@
 cognitive-complexity-threshold = 20
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+# Matches Cargo.toml's `rust-version`; enables `clippy::incompatible_msrv`.
+msrv = "1.88.0"

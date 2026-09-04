@@ -8,7 +8,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
+
+# RUSTFLAGS=-Dwarnings is deliberately not set here: it would apply to
+# dependency compilation too (fuser, windows, proptest, and their transitive
+# trees), so a new stable rustc adding one warning anywhere in that graph
+# would red every job with no anymount changes. Every lint gate instead
+# passes `-Dwarnings` explicitly to `cargo clippy`, which scopes it to this
+# crate. See CLAUDE.md's Code Style section.
 
 jobs:
   # Phase 0: prove the crate builds and its runtime dependencies resolve on all
@@ -90,6 +96,19 @@ jobs:
       # same way the FUSE backend needs macos-latest today.
       - name: Check macOS
         run: cargo check --target aarch64-apple-darwin
+
+  msrv:
+    name: MSRV (1.88.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - run: sudo apt-get update && sudo apt-get install -y fuse3
+      # Pins to the exact floor `rust-version` in Cargo.toml declares, so API
+      # usage newer than that only shows up here, not on a user's older
+      # toolchain. `dtolnay/rust-toolchain@stable` in the other jobs drifts
+      # forward over time and would not catch this.
+      - run: cargo check --all-targets
 
   licenses:
     name: licence policy
