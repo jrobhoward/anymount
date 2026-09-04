@@ -6,7 +6,7 @@
 //! | OS | Mechanism | Notes |
 //! |----|-----------|-------|
 //! | Linux | FUSE via `fusermount3` | unprivileged; libfuse never linked |
-//! | macOS | FUSE via macFUSE | kext-free on macFUSE 5.2+ / macOS 15.4+ |
+//! | macOS | none yet | decided: NFS, not FUSE — not built as `backend/nfs.rs` yet; see `docs/PLAN.md` |
 //! | Windows | Cloud Files (cfapi) | projects into a directory, not a drive letter |
 //!
 //! # Licensing
@@ -15,8 +15,9 @@
 //! dependency graph**. That is a deliberate design constraint, not an accident:
 //! WinFsp (GPLv3), Dokany (LGPL) and `windows-projfs` (GPL-2.0) are all
 //! excluded — ProjFS itself was evaluated in Phase 0 and dropped for having no
-//! capability advantage over cfapi, see `docs/GAPS.md` — and macFUSE's libfuse
-//! is resolved at runtime rather than linked.
+//! capability advantage over cfapi, see `docs/GAPS.md` — and Linux's FUSE
+//! backend never links libfuse, mounting through the `fusermount3` binary
+//! instead.
 //! `cargo deny check licenses` enforces this in CI.
 //!
 //! # Example
@@ -57,10 +58,7 @@ pub use types::{DirEntry, FileAttr, FileHandle, FileKind, Ino, ROOT_INO, StatFs}
 pub mod probe {
     /// Is a usable backend compiled in for this platform?
     pub fn any_backend_available() -> bool {
-        cfg!(all(
-            any(target_os = "linux", target_os = "macos"),
-            feature = "fuse"
-        )) || cfg!(all(windows, feature = "cfapi"))
+        cfg!(all(target_os = "linux", feature = "fuse")) || cfg!(all(windows, feature = "cfapi"))
     }
 
     #[cfg(all(windows, feature = "cfapi"))]

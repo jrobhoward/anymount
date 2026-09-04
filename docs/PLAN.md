@@ -695,8 +695,105 @@ targeted spike than the WebDAV one and covers less ground. Before
 
 ### Phase 1 — harden the trait
 
-Inode/handle lifetime rules, `forget` handling, xattr plumbing, `statfs`.
-Property tests over the readdir cookie arithmetic.
+**Done.**
+
+- **Inode/handle lifetime rules — documented, not new code.** `ReadOnlyFs`'s
+  doc comment (`src/fs.rs`) now states the contract explicitly: an `Ino` must
+  answer `getattr` correctly for the life of the mount (no eviction
+  contract), `open` may be called more than once for the same `ino` with each
+  call returning an independent `FileHandle`, handles need not be released in
+  the order they were opened, and a backend serving several worker threads
+  may call `read_at` on the same handle concurrently — implementors do their
+  own locking, matching the existing `Send + Sync` requirement.
+- **`forget` handling — added as an optional hook, not a required one.**
+  `ReadOnlyFs::forget(&self, ino: Ino, nlookup: u64)` defaults to doing
+  nothing. Nothing in the trait requires lookup-count bookkeeping — a
+  filesystem that answers every `getattr`/`lookup` fresh has no cache to
+  evict — so the default is correct for `examples/memfs.rs` and for
+  ciphercask's likely shape unless it caches a built tree. The hook exists for
+  implementors that do cache: `backend/fuse.rs` now forwards `fuser`'s
+  `forget` callback (`batch_forget`'s default already forwards each node to
+  `forget`, so no separate override was needed). cfapi has no equivalent
+  notification and never calls it — documented on the trait method, not
+  worked around.
+- **xattr plumbing — was dead code, now wired.** `ReadOnlyFs::listxattr` and
+  `getxattr` have existed since Phase 0 with sensible defaults, but
+  `backend/fuse.rs`'s `FuseAdapter` never implemented `fuser`'s `listxattr`/
+  `getxattr` callbacks, so `fuser`'s own defaults (`ENOSYS`, logged as "Not
+  Implemented") answered instead — any implementor's overrides were
+  unreachable from the FUSE path. Both are now wired, honoring FUSE's
+  size-query convention (`size == 0` → reply with the length only; a value
+  too large for the given `size` → `ERANGE`, never silent truncation).
+- **`statfs`** was already wired in Phase 0; nothing further needed.
+- **Property tests over the readdir cookie arithmetic.** The cookie math that
+  used to be inline in `FuseAdapter::readdir` (`.` = cookie 1, `..` = cookie
+  2, trait entry `i` = cookie `i + 3`) is now `backend/fuse::cookie`, three
+  pure functions with no `fuser` types involved, so it can be tested without
+  a live session. `src/backend/fuse_tests.rs` adds `proptest`
+  (new dev-dependency; `cargo deny check licenses bans sources` passes with
+  it — MIT/Apache-2.0 throughout its graph, only new warning is the
+  pre-existing "duplicate `syn` version" class, already `warn` not `deny`)
+  covering two things: the cookie functions round-trip and never collide with
+  `.`/`..`'s reserved cookies, and — the part worth having a property test
+  for — a full directory listing reassembled from many buffer-limited FUSE
+  calls (`one_call`/`full_listing` in the test file simulate `ReplyDirectory`'s
+  "buffer full" contract with an arbitrary per-call capacity) always equals
+  exactly one `.`, one `..`, then every trait entry in order, for any
+  combination of entry count (0–500) and buffer capacity (1–20), 512 cases per
+  property.
+
+**`fuse` is now Linux-only — the macOS FUSE fallback is removed from the
+tree, not merely made optional.** While verifying the above, `cargo build
+--all-targets`/`cargo test` failed to link on this machine because its
+macFUSE install is gone (only a stale 2011-era i386/x86_64 OSXFUSE.framework
+remains, no `fuse.pc`, incompatible with this arm64 toolchain anyway).
+Reproducing the same link failure on a clean `git stash` confirmed this was
+pre-existing and unrelated to the Phase 1 changes above — but it exposed that
+the crate had never actually committed to "macOS's backend is NFS" (the
+"Revised decision" earlier in this file): `fuse` was still default-on and
+target-scoped to `any(linux, macos)`, so any macOS box without a working
+macFUSE install couldn't build or test the crate at all with default
+features, and `probe`/`any_backend_available` still advertised FUSE as
+available on macOS by feature flag alone, regardless of whether `fuser` was
+actually linkable there.
+
+Fixed by making the code match the decision that was already on record:
+`fuse` (`Cargo.toml`) is now gated to `target_os = "linux"` only, in both the
+feature-to-dependency mapping and every `cfg` that gates `backend/fuse.rs`'s
+inclusion (`backend/mod.rs`, `src/lib.rs`, `examples/probe.rs`). The
+`[target.'cfg(target_os = "macos")'.dependencies]` table no longer names
+`fuser` at all — only `libc`, still needed for `types.rs`'s
+`cfg(unix)` uid/gid helpers. macOS currently compiles with **no** mount
+backend; `auto_mount` returns `FsError::Unsupported` there until
+`backend/nfs.rs` is built for real (still just the Phase 0.6 spike, not in
+the tree). This is not a regression — macOS mounting didn't work by default
+on an unprepared machine before this change either, it just failed at
+`cargo build` time instead of failing cleanly at `mount()` time with an
+actionable error.
+
+Consequences worth recording:
+- `cargo check --target aarch64-apple-darwin` no longer needs
+  `--no-default-features` — default features are now a true no-op for that
+  target, so the flag was dropped from `CLAUDE.md`, `Cargo.toml`'s cross-check
+  guidance, and `.github/workflows/ci.yml`'s `cross-check` job.
+- CI's `build` job no longer installs macFUSE on the `macos-latest` runner —
+  there is nothing left in the tree that would use it. That runner still
+  builds and tests the platform-independent parts of the crate; it proves
+  nothing about FUSE or NFS on macOS specifically, which is now honestly
+  reflected in the workflow's comments rather than papered over by a
+  `continue-on-error` cask install.
+- `cargo test`, `cargo build --all-targets`, and `cargo clippy --all-targets
+  -- -Dwarnings` all now pass locally on this machine with **default**
+  features — no `--no-default-features`/`--features cfapi` workaround
+  needed — closing out the verification gap from earlier in this phase.
+  `cargo deny check licenses bans sources` and both cross-compile checks
+  (`x86_64-pc-windows-msvc` clippy, `aarch64-apple-darwin` check) still pass.
+- If a macOS FUSE fallback is ever wanted again before `backend/nfs.rs`
+  exists, it needs its own opt-in feature and its own manifest identity for
+  the `fuser` dependency (Cargo has no per-target default-feature list, so
+  the only way to keep it off by default without also disabling Linux's is a
+  second, differently-named optional dependency) — not a reversion to the
+  shared `any(linux, macos)` gating this phase removed.
 
 ### Phase 2 — Windows backend
 
@@ -825,21 +922,23 @@ A `CaskFs` implementing `ReadOnlyFs`:
 | Feature | Default | Effect |
 |---|---|---|
 | `fuse` | yes | FUSE backend (Linux only). Dependency is `cfg(target_os = "linux")`-scoped |
-| `nfs` | yes | NFS backend (macOS only). Dependency is `cfg(target_os = "macos")`-scoped |
+| `nfs` | — | NFS backend (macOS only). Not implemented yet — no such feature or dependency exists in `Cargo.toml` today; `backend/nfs.rs` is still just the Phase 0.6 spike, not in the tree |
 | `cfapi` | yes | Cloud Files backend (Windows only). Dependency is `cfg(windows)`-scoped |
 | `tracing` | no | Per-operation spans |
 
-Cargo cannot express per-OS defaults, so `fuse`, `nfs`, and `cfapi` all ship
-in `default` and compile to nothing off-platform; because the dependencies
-live under `[target.'cfg(...)'.dependencies]`, a Linux build never fetches
-`windows`, and a Linux or Windows build never fetches whatever RPC/XDR crate
-the macOS backend picks.
+Cargo cannot express per-OS defaults, so `fuse` and `cfapi` both ship in
+`default` and compile to nothing off-platform; because the dependencies live
+under `[target.'cfg(...)'.dependencies]`, a Linux build never fetches
+`windows`, and neither a Linux nor a Windows build fetches whatever RPC/XDR
+crate a real `nfs` feature will eventually need on macOS.
 
-This is a change from `fuse` being `cfg(unix)`-scoped (covering both Linux
-and macOS) in the original Phase 0 design — narrowing it to Linux only, and
-adding `nfs` for macOS, is part of implementing the decision above, not yet
-done as of this writing. (An earlier version of this plan named the macOS
-feature `webdav`; superseded by the NFS decision above.)
+`fuse` narrowing from `cfg(unix)` (Linux and macOS both) to `cfg(target_os =
+"linux")` only is **done** (Phase 1) — see that phase's notes for what broke
+locally before this landed and why. `nfs` for macOS is not: this table
+describes the target shape for when `backend/nfs.rs` is built, not current
+state. Until then, macOS compiles with no mount backend at all, and
+mounting there returns `FsError::Unsupported`. (An earlier version of this
+plan named the macOS feature `webdav`; superseded by the NFS decision above.)
 
 Deliberately absent: any `winfsp`, `projfs`, or `async` feature.
 

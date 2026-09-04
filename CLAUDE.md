@@ -6,8 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `anymount` mounts a read-only filesystem from user space on Linux, macOS and
 Windows. An implementor writes one trait, `ReadOnlyFs`; the crate mounts it with
-whatever mechanism the host OS provides — FUSE on Linux and macOS, the Cloud
-Files API (cfapi) on Windows.
+whatever mechanism the host OS provides — FUSE on Linux, NFS on macOS, the
+Cloud Files API (cfapi) on Windows. One backend per platform, not a shared
+mechanism across platforms — see `docs/PLAN.md`'s "Revised decision" for why
+FUSE and WebDAV were both set aside on macOS in favor of NFS.
+
+**macOS has no backend built yet.** The decision is NFS (`docs/PLAN.md`), and
+the mechanism is spiked and proven there, but `backend/nfs.rs` does not exist
+in the tree — mounting on macOS currently compiles fine and returns
+`FsError::Unsupported` at mount time. There is no `fuse` module, feature, or
+`Backend` variant scoped to macOS; `fuse` is Linux-only. Do not reach for
+macFUSE as a stopgap without revisiting that decision first.
 
 **Read-only is the scope, not a stage.** Write operations report `EROFS`.
 `docs/GAPS.md` lists every limitation and what changing it costs.
@@ -39,12 +48,13 @@ cargo test some____test____name                  # single test
 cargo clippy --all-targets -- -Dwarnings
 cargo fmt --all -- --check
 
-# Cross-compile checks for the other OS backends (no linker needed for `check`).
-# Windows checks fully; macOS cannot, because `fuser`'s build script calls
-# pkg-config for libfuse and that needs a macOS sysroot. The macos-latest CI
-# runner is what actually verifies the FUSE backend there.
+# Cross-compile checks for the other OS backend (no linker needed for `check`).
+# Windows checks fully. macOS has no backend in the tree yet (see "What this
+# is"), so this only proves the platform-independent parts still compile
+# there; it needs no default-features flag since `fuse` is Linux-only and a
+# no-op off it.
 cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -Dwarnings
-cargo check --target aarch64-apple-darwin --no-default-features
+cargo check --target aarch64-apple-darwin
 
 # Supply chain — run before adding or updating any dependency
 cargo deny check licenses bans sources
@@ -72,8 +82,9 @@ Single crate, edition 2024, `rust-version = 1.88.0`.
 - `mount.rs` — `MountBuilder` and `Mount`. `Mount` unmounts on drop;
   `Mount::unmount` surfaces the errors that drop swallows.
 - `backend/` — one module per OS mechanism, `cfg`-gated *and* feature-gated:
-  `fuse.rs` (Linux, macOS), `cfapi.rs` (Windows). `backend/mod.rs` resolves
-  `Backend::Auto` and owns the `MountHandle` enum.
+  `fuse.rs` (Linux only), `cfapi.rs` (Windows). No `nfs.rs` yet — see "What
+  this is". `backend/mod.rs` resolves `Backend::Auto` and owns the
+  `MountHandle` enum.
 
 ### Why it looks like this
 
@@ -101,10 +112,9 @@ through.
 
 **Linux does not link libfuse.** `fuser` is built with
 `default-features = false`, so mounting goes through the `fusermount3` binary.
-That keeps LGPL code out of the link and allows unprivileged mounts. macOS does
-need the libfuse path, because macFUSE supplies the mount helper; the dylib is
-resolved at runtime and never vendored. Do not add `fuser`'s default features to
-the Linux target.
+That keeps LGPL code out of the link and allows unprivileged mounts. Do not add
+`fuser`'s default features to the Linux target — that pulls in the libfuse
+link path, which this crate deliberately avoids everywhere it mounts via FUSE.
 
 ## Licensing is a design constraint
 
@@ -117,7 +127,7 @@ all copyleft, so the crate routes around them:
 | `winfsp`, `winfsp-sys` | GPL-3.0 | nothing; WinFsp is out of scope |
 | `windows-projfs` | GPL-2.0 | Microsoft's `windows` crate |
 | `dokan`, `dokan-sys` | wrap LGPL Dokany | cfapi |
-| libfuse (linked) | LGPL | `fusermount3` on Linux; runtime dylib on macOS |
+| libfuse (linked) | LGPL | `fusermount3` on Linux (the only platform that links FUSE at all — see "What this is") |
 
 `deny.toml` bans those crates by name, so an accidental `cargo add` fails loudly
 rather than quietly relicensing the crate. The licence allow-list is

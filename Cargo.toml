@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.88.0"
 license = "MIT OR Apache-2.0"
 authors = ["James Howard <jrobhoward@gmail.com>"]
-description = "Cross-platform read-only userspace filesystems: FUSE on Linux and macOS, Cloud Files on Windows"
+description = "Cross-platform read-only userspace filesystems: FUSE on Linux, Cloud Files on Windows"
 repository = "https://github.com/jrobhoward/anymount"
 homepage = "https://github.com/jrobhoward/anymount"
 keywords = ["filesystem", "fuse", "cfapi", "mount", "userspace"]
@@ -15,7 +15,10 @@ readme = "README.md"
 [features]
 default = ["fuse", "cfapi"]
 
-# FUSE backend (Linux, macOS). Inert on Windows.
+# FUSE via `fusermount3` (Linux only — macOS's decided backend is NFS, not
+# FUSE; see docs/PLAN.md). No libfuse to link, just the helper binary, so this
+# has no extra system requirement and is safe to default-enable everywhere
+# `cargo build`/`cargo test` might run. Inert (compiles to nothing) off Linux.
 fuse = ["dep:fuser"]
 # Windows Cloud Files (cfapi) backend. Inert off Windows.
 cfapi = ["dep:windows"]
@@ -26,6 +29,9 @@ tracing = ["dep:tracing"]
 thiserror = "2"
 tracing = { version = "0.1", optional = true }
 
+[dev-dependencies]
+proptest = "1"
+
 # Linux: no libfuse. `default-features = false` makes `fuser` mount via the
 # `fusermount3` binary, which keeps LGPL libfuse out of the link entirely and
 # allows unprivileged mounts.
@@ -33,10 +39,10 @@ tracing = { version = "0.1", optional = true }
 fuser = { version = "0.18", default-features = false, optional = true }
 libc = "0.2"
 
-# macOS: macFUSE provides the mount helper, so the libfuse path is required.
-# The dylib is resolved at runtime, never vendored.
+# macOS has no backend yet — the decided one is NFS (docs/PLAN.md), not built
+# as `backend/nfs.rs` yet. `libc` is still needed here: `types.rs`'s
+# `current_uid`/`current_gid` are `cfg(unix)`, which covers macOS too.
 [target.'cfg(target_os = "macos")'.dependencies]
-fuser = { version = "0.18", optional = true }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]

@@ -13,7 +13,7 @@ pub enum Backend {
     /// Pick the best available for this OS.
     #[default]
     Auto,
-    /// FUSE. Linux and macOS (via macFUSE).
+    /// FUSE, via `fusermount3`. Linux only.
     Fuse,
     /// Windows Cloud Files API.
     CfApi,

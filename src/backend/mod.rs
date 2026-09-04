@@ -1,5 +1,10 @@
 //! Per-OS backends and the dispatch that picks one.
 //!
+//! One mechanism per platform: FUSE on Linux, cfapi on Windows. macOS's
+//! decided backend is NFS (`docs/PLAN.md`), not yet built as a real
+//! `backend/nfs.rs` — macOS currently compiles in no backend at all, and
+//! `auto_mount` reports [`FsError::Unsupported`] there.
+//!
 //! Every backend is compiled only for its own platform *and* gated behind a
 //! cargo feature. Because cargo cannot express per-OS defaults, `fuse` and
 //! `cfapi` are both on by default and simply compile to nothing off-platform;
@@ -10,7 +15,7 @@ use crate::error::{FsError, Result};
 use crate::fs::ReadOnlyFs;
 use crate::mount::{Backend, Mount, MountBuilder};
 
-#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "fuse"))]
+#[cfg(all(target_os = "linux", feature = "fuse"))]
 pub(crate) mod fuse;
 
 #[cfg(all(windows, feature = "cfapi"))]
@@ -18,7 +23,7 @@ pub(crate) mod cfapi;
 
 /// Backend-specific live-mount state.
 pub(crate) enum MountHandle {
-    #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "fuse"))]
+    #[cfg(all(target_os = "linux", feature = "fuse"))]
     Fuse(fuse::FuseHandle),
     #[cfg(all(windows, feature = "cfapi"))]
     CfApi(cfapi::CfApiHandle),
@@ -30,7 +35,7 @@ pub(crate) enum MountHandle {
 impl MountHandle {
     pub(crate) fn unmount(self) -> Result<()> {
         match self {
-            #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "fuse"))]
+            #[cfg(all(target_os = "linux", feature = "fuse"))]
             Self::Fuse(h) => h.unmount(),
             #[cfg(all(windows, feature = "cfapi"))]
             Self::CfApi(h) => h.unmount(),
@@ -47,7 +52,7 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<Mount
     let inner = match requested {
         Backend::Auto => auto_mount(builder, fs)?,
 
-        #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "fuse"))]
+        #[cfg(all(target_os = "linux", feature = "fuse"))]
         Backend::Fuse => MountHandle::Fuse(fuse::mount(builder, fs)?),
 
         #[cfg(all(windows, feature = "cfapi"))]
@@ -68,7 +73,7 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<Mount
 /// `docs/PLAN.md`). ProjFS was evaluated and is not used — see `docs/GAPS.md`.
 #[allow(unused_variables, unused_mut)]
 fn auto_mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<MountHandle> {
-    #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "fuse"))]
+    #[cfg(all(target_os = "linux", feature = "fuse"))]
     {
         return Ok(MountHandle::Fuse(fuse::mount(builder, fs)?));
     }
@@ -81,16 +86,17 @@ fn auto_mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<MountHandle
     #[allow(unreachable_code)]
     Err(FsError::Unsupported(
         "no mount backend compiled in for this platform; \
-         enable the `fuse` feature on Linux/macOS or `cfapi` on Windows",
+         enable the `fuse` feature on Linux or `cfapi` on Windows \
+         (macOS has no backend yet — see docs/PLAN.md)",
     ))
 }
 
 #[allow(dead_code)]
 fn unavailable(backend: Backend) -> FsError {
     match backend {
-        Backend::Fuse => FsError::Unsupported(
-            "the `fuse` backend requires Linux or macOS and the `fuse` feature",
-        ),
+        Backend::Fuse => {
+            FsError::Unsupported("the `fuse` backend requires Linux and the `fuse` feature")
+        }
         Backend::CfApi => {
             FsError::Unsupported("the `cfapi` backend requires Windows and the `cfapi` feature")
         }

@@ -1,11 +1,12 @@
-//! FUSE backend, used on Linux and macOS.
+//! FUSE backend, Linux only.
 //!
-//! On Linux `fuser` is built with `default-features = false`, so mounting goes
-//! through the `fusermount3` helper binary rather than linking libfuse. That
-//! keeps LGPL code out of the link *and* permits unprivileged mounts.
+//! `fuser` is built with `default-features = false`, so mounting goes through
+//! the `fusermount3` helper binary rather than linking libfuse. That keeps
+//! LGPL code out of the link *and* permits unprivileged mounts.
 //!
-//! On macOS the libfuse path is required, because macFUSE supplies the mount
-//! helper. The dylib is resolved at runtime and never vendored.
+//! macOS's decided backend is NFS, not FUSE — see `docs/PLAN.md` — so this
+//! module is gated to Linux only (`backend/mod.rs`). There is no macFUSE
+//! fallback in the tree.
 
 use std::ffi::OsStr;
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use std::time::{Duration, SystemTime};
 use fuser::{
     BackgroundSession, Config, Errno, FopenFlags, Generation, INodeNo, LockOwner, MountOption,
     OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    ReplyStatfs, Request, SessionACL,
+    ReplyStatfs, ReplyXattr, Request, SessionACL,
 };
 
 use crate::error::{FsError, Result};
@@ -156,6 +157,12 @@ impl<F: ReadOnlyFs> fuser::Filesystem for FuseAdapter<F> {
         reply.ok();
     }
 
+    // `batch_forget`'s default already forwards each node to `forget`, so no
+    // separate override is needed here.
+    fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
+        self.fs.forget(Ino(ino.0), nlookup);
+    }
+
     fn readdir(
         &self,
         _req: &Request,
@@ -164,31 +171,29 @@ impl<F: ReadOnlyFs> fuser::Filesystem for FuseAdapter<F> {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        // `.` and `..` occupy the first two cookies; the trait never returns
-        // them, so entry N from the trait is cookie N + 3.
         let mut next = offset;
         if next == 0 {
-            if reply.add(ino, 1, fuser::FileType::Directory, ".") {
+            if reply.add(ino, cookie::DOT, fuser::FileType::Directory, ".") {
                 reply.ok();
                 return;
             }
-            next = 1;
+            next = cookie::DOT;
         }
-        if next == 1 {
-            if reply.add(ino, 2, fuser::FileType::Directory, "..") {
+        if next == cookie::DOT {
+            if reply.add(ino, cookie::DOTDOT, fuser::FileType::Directory, "..") {
                 reply.ok();
                 return;
             }
-            next = 2;
+            next = cookie::DOTDOT;
         }
 
-        match self.fs.readdir(Ino(ino.0), next - 2) {
+        match self.fs.readdir(Ino(ino.0), cookie::trait_offset(next)) {
             Ok(entries) => {
                 for (i, entry) in entries.iter().enumerate() {
-                    let cookie = next + i as u64 + 1;
+                    let c = cookie::for_entry(cookie::trait_offset(next) + i as u64);
                     if reply.add(
                         INodeNo(entry.ino.0),
-                        cookie,
+                        c,
                         to_fuser_kind(entry.kind),
                         &entry.name,
                     ) {
@@ -209,6 +214,64 @@ impl<F: ReadOnlyFs> fuser::Filesystem for FuseAdapter<F> {
             Err(e) => reply.error(errno(&e)),
         }
     }
+
+    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        match self.fs.listxattr(Ino(ino.0)) {
+            Ok(names) => {
+                let mut buf = Vec::new();
+                for name in &names {
+                    buf.extend_from_slice(name.as_encoded_bytes());
+                    buf.push(0);
+                }
+                reply_xattr(&buf, size, reply);
+            }
+            Err(e) => reply.error(errno(&e)),
+        }
+    }
+
+    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        match self.fs.getxattr(Ino(ino.0), name) {
+            Ok(value) => reply_xattr(&value, size, reply),
+            Err(e) => reply.error(errno(&e)),
+        }
+    }
+}
+
+/// Cookie encoding for FUSE `readdir` replies, kept as pure functions so the
+/// resume arithmetic can be property-tested without a live session.
+///
+/// `.` occupies cookie 1 and `..` cookie 2; the trait's own entry at (0-based)
+/// offset `o` — from `fs.readdir(ino, o)` — occupies cookie `o + 3`. A resume
+/// request's `offset` is the cookie of the last entry the kernel accepted, so
+/// [`trait_offset`] and [`for_entry`] are inverses of each other for any
+/// cookie `>= DOTDOT`.
+mod cookie {
+    pub(super) const DOT: u64 = 1;
+    pub(super) const DOTDOT: u64 = 2;
+
+    /// Trait-level offset to resume `fs.readdir` from, given the cookie the
+    /// kernel is resuming after (`0` on a fresh `readdir`).
+    pub(super) fn trait_offset(resume_after: u64) -> u64 {
+        resume_after.saturating_sub(DOTDOT)
+    }
+
+    /// Cookie for the trait's entry at `trait_offset`.
+    pub(super) fn for_entry(trait_offset: u64) -> u64 {
+        trait_offset + DOTDOT + 1
+    }
+}
+
+/// Shared FUSE size-query convention for `getxattr`/`listxattr`: `size == 0`
+/// asks for the value's length only, otherwise the value is returned in full
+/// or the request is rejected with `ERANGE` rather than silently truncated.
+fn reply_xattr(data: &[u8], size: u32, reply: ReplyXattr) {
+    if size == 0 {
+        reply.size(data.len() as u32);
+    } else if data.len() > size as usize {
+        reply.error(Errno::ERANGE);
+    } else {
+        reply.data(data);
+    }
 }
 
 fn errno(e: &crate::error::FsError) -> Errno {
@@ -221,6 +284,10 @@ fn to_fuser_kind(kind: FileKind) -> fuser::FileType {
         FileKind::Directory => fuser::FileType::Directory,
     }
 }
+
+#[cfg(test)]
+#[path = "fuse_tests.rs"]
+mod fuse_tests;
 
 fn to_fuser_attr(attr: &FileAttr) -> fuser::FileAttr {
     fuser::FileAttr {

@@ -106,3 +106,11 @@ fn getxattr____default_implementation____reports_no_attribute() {
         Err(FsError::NoXattr)
     ));
 }
+
+#[test]
+fn forget____default_implementation____is_a_harmless_no_op() {
+    // No assertion beyond "does not panic": implementations with no
+    // inode-keyed cache are meant to ignore this entirely.
+    let fs = OneFile;
+    fs.forget(Ino(2), 1);
+}

@@ -20,21 +20,21 @@ fn main() {
         anymount::probe::any_backend_available()
     );
 
-    #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "fuse"))]
+    #[cfg(all(target_os = "linux", feature = "fuse"))]
     {
         println!("\nFUSE:");
-        #[cfg(target_os = "linux")]
-        {
-            let helper = std::path::Path::new("/usr/bin/fusermount3").exists()
-                || std::path::Path::new("/bin/fusermount3").exists();
-            println!("  fusermount3 present: {helper}");
-            if !helper {
-                println!("  hint: install fuse3 (Debian/Ubuntu: apt install fuse3)");
-            }
+        let helper = std::path::Path::new("/usr/bin/fusermount3").exists()
+            || std::path::Path::new("/bin/fusermount3").exists();
+        println!("  fusermount3 present: {helper}");
+        if !helper {
+            println!("  hint: install fuse3 (Debian/Ubuntu: apt install fuse3)");
         }
-        #[cfg(target_os = "macos")]
-        println!("  requires macFUSE: https://macfuse.io (5.2+ avoids the kernel extension)");
     }
+
+    // macOS has no backend in the tree yet — the decided mechanism is NFS,
+    // not FUSE (docs/PLAN.md) — so nothing to probe there today.
+    #[cfg(target_os = "macos")]
+    println!("\nno backend compiled in for macOS yet (decided: NFS; see docs/PLAN.md)");
 
     #[cfg(all(windows, feature = "cfapi"))]
     {

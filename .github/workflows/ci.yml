@@ -30,12 +30,9 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y fuse3
 
-      # macFUSE supplies the mount helper that the libfuse path needs.
-      - name: Install macFUSE (macOS)
-        if: runner.os == 'macOS'
-        run: brew install --cask macfuse || echo "macFUSE needs a kext approval; build-only on CI"
-        continue-on-error: true
-
+      # macOS has no backend in the tree yet — the decided mechanism is NFS,
+      # not FUSE (docs/PLAN.md) — so nothing platform-specific to install
+      # here; this job only proves the platform-independent parts build.
       - run: cargo build --all-targets
       - run: cargo test
       - run: cargo clippy --all-targets -- -Dwarnings
@@ -86,13 +83,13 @@ jobs:
       - name: Check Windows backend
         run: cargo check --target x86_64-pc-windows-msvc
 
-      # macOS can only be checked without default features: `fuser`'s build
-      # script calls pkg-config for libfuse, which needs a macOS sysroot that a
-      # Linux runner does not have. The macos-latest job above is what actually
-      # verifies the FUSE backend there; this only catches platform-independent
-      # breakage early.
-      - name: Check macOS (no backend)
-        run: cargo check --target aarch64-apple-darwin --no-default-features
+      # macOS has no backend in the tree yet (decided mechanism is NFS, not
+      # FUSE — docs/PLAN.md), so there is no macOS-specific code to miss here;
+      # this only catches platform-independent breakage early. Revisit once
+      # `backend/nfs.rs` exists — it will need its own real macOS runner the
+      # same way the FUSE backend needs macos-latest today.
+      - name: Check macOS
+        run: cargo check --target aarch64-apple-darwin
 
   licenses:
     name: licence policy
