@@ -90,15 +90,112 @@ binary* from starting rather than yielding a catchable error. Any new ProjFS
 code must resolve entry points dynamically (`GetProcAddress` or
 delay-loading), never link them statically.
 
-## macOS: no native FSKit backend
+## macOS: no FSKit backend — third-party FSKit modules do not load on this OS build
 
-FSKit is unusable from a Rust library: the entry point must be Swift, it must be
-packaged as an Xcode-built `.appex` with entitlements and notarisation, and
-`FSUnaryFileSystem` only supports filesystems that mount on a `/dev` node — not
-synthetic ones.
+**Moot for macOS as actually shipped: the decided macOS backend is NFS, not
+FUSE, so none of this section applies to normal use.** Kept in full below as
+background for why FUSE (and its FSKit alternatives) were set aside — and
+because `fuse`/macFUSE remains an available fallback if NFS ever turns out to
+have a blocking problem of its own. See `docs/PLAN.md`'s "Revised decision"
+section for the full history. Skip to the next section unless debugging the
+FUSE fallback specifically.
 
-*Mitigated by:* macFUSE 5.2+ ships its own FSKit backend, so on macOS 15.4+ the
-mount is kernel-extension-free anyway, reached through the ordinary FUSE path.
+FSKit (macOS 15.4+) is Apple's kernel-extension-free framework for user-space
+filesystems, and would in principle be the modern kext-free path on macOS —
+either through macFUSE's own FSKit backend, or a filesystem written directly
+against FSKit. Neither is usable today. This is a platform-level finding, not
+specific to `fuser` or to this crate.
+
+**`fuser` cannot reach macFUSE's FSKit backend.** `fuser` 0.18 (the FUSE
+binding this crate uses) hardwires macOS mounting to `fuse_mount_compat25`, a
+legacy libfuse2-compatible C entry point (`fuser-0.18.0/build.rs`,
+unconditional on `target_os = "macos"`, never probes `fuse3`). Passing
+`MountOption::CUSTOM("backend=fskit")` through that entry point fails
+immediately with no FSKit or XPC activity in the system log.
+
+Tracing macFUSE's own public source (`github.com/macfuse/library`,
+`github.com/macfuse/mount`, `github.com/macfuse/framework`) explains why: the
+open-source C library (what `fuse.pc` resolves to, and what `fuser` links
+against) has no knowledge of `backend=fskit` at all. At mount time
+(`mount_darwin.c`) it always `execv()`s an external helper, `mount_macfuse`,
+passing the `-o` string through verbatim — the *helper* decides what to do
+with `backend=fskit`, using Swift bridge classes (`Mount/Mounter.swift`) that
+build an XPC request naming `"backend": "fskit"`. `mount_macfuse` itself is
+not in any of macFUSE's public repositories — it ships only as a prebuilt,
+signed binary inside the `.pkg`. So there is no way to reach the FSKit path by
+building macFUSE from source or by writing custom FFI against the public C
+API; the routing logic is closed-source either way.
+
+**Even macFUSE's official, signed FSKit module fails to authorize on this
+machine (macOS 26.6.2, build 25G83).** After installing macFUSE 5.3.3,
+launching `macfuse.app` once to register its FSKit app extensions
+(`pluginkit -m` then lists `io.macfuse.app.fsmodule.macfuse` and `-local`),
+System Settings → General → Login Items & Extensions → Extensions → macFUSE →
+FSKit Modules shows both modules but the toggle to enable either is disabled —
+it cannot even be clicked. `log stream` during the attempt shows the cause:
+
+```
+fskitd[428]: About to get current agent for 501
+fskitd[428]: Received error '(null)', errno 2, retrieving team ID
+```
+
+repeated on every attempt. `fskitd` cannot resolve a Developer Team ID for the
+module at all (errno 2 = ENOENT on the lookup itself), so the settings UI
+never reaches an allow/deny decision. This is the same class of bug reported
+upstream for a from-scratch FSKit module:
+[`andrewgazelka/loaf#1`](https://github.com/andrewgazelka/loaf/issues/1),
+"FSKit third-party extensions broken on macOS 26" — there `fskitd` logs an
+explicit entitlement denial (`Hello FSClient! entitlement no`) rather than a
+team-ID lookup failure, against earlier builds (25B78, 25C56), but the shape is
+the same: `fskitd` refuses to authorize a third-party FSKit module regardless
+of signing or entitlements. A from-scratch FSKit filesystem (e.g. via
+`KhaosT/FSKitSample`, Apache-2.0) would very likely hit the same wall once
+built, independent of whatever crate or hand-written FFI serves it.
+
+Also unresolved, and moot until the above is fixed: whether `FSUnaryFileSystem`
+can serve purely synthetic content or requires a real block-device resource.
+Apple's own sample mounts against a dummy `hdiutil`-created raw disk image
+rather than truly resource-less content, but macFUSE's FSKit backend
+demonstrably mounts a synthetic in-memory tree, so this constraint (if it is
+one) is not fundamental to FSKit — just unconfirmed from first-hand testing
+here.
+
+*Practical consequence:* mounting through this crate on macOS requires
+approving macFUSE's kernel extension — and on Apple Silicon, that approval
+path itself has a cost worth knowing up front (see below), not just a click.
+
+*To change:* retest once Apple ships a `fskitd` fix (track
+`andrewgazelka/loaf#1` or file a fresh report) — first against macFUSE's own
+FSKit module (no crate changes needed, since `mount_macfuse` handles it), then
+reconsider a `fuser` upgrade or hand-written FFI if a bare `fuse_mount`-style
+entry point regains relevance. A from-scratch FSKit filesystem is a separate,
+larger option gated on the same `fskitd` fix, not on anything in this crate.
+Moot for the decided NFS backend either way — see the top of this section.
+
+## macOS: approving macFUSE's kernel extension requires lowering boot security (Apple Silicon)
+
+**Only applies to the FUSE fallback, not the decided NFS backend** — the
+README's macOS row lists no install burden for the default path precisely
+because NFS avoids all of this. Relevant only when deliberately using the
+`fuse`/macFUSE path instead.
+
+On Apple Silicon, there is no click-through approval for a third-party kernel
+extension in ordinary System Settings — no "Driver Extensions" row appears
+under Login Items & Extensions, and nothing appears under Privacy & Security
+either, even after `kernelmanagerd`/`syspolicyd` have logged an explicit
+`Kernel Extension BLOCKED: ... not approved to load. Please approve using
+System Settings` in response to a real mount attempt. The approval surface
+only exists after the machine is rebooted into **Recovery Mode**, **Startup
+Security Utility** is opened, and the boot security policy is lowered from
+"Full Security" to **"Reduced Security"** with **"Allow user management of
+kernel extensions from identified developers"** checked. That is a standing
+change to the machine's boot-time security posture, not scoped to this crate
+or reversible with a single click — worth deciding deliberately rather than
+doing as a side effect of setting up a dev environment.
+
+*To change:* nothing to change in the crate. Document the real cost plainly
+(here, and to anyone setting up a macOS dev machine on the FUSE fallback)
+rather than downplay it.
 
 ## No async
 
