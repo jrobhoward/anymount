@@ -49,6 +49,10 @@ cargo test some____test____name                  # single test
 cargo clippy --all-targets -- -Dwarnings
 cargo fmt --all -- --check
 
+# Rustdoc, with broken intra-doc links treated as errors. Set on this command
+# only, never in a shared `env:` block — see "Never set RUSTFLAGS" below.
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
 # Cross-compile checks for the other OS backends (no linker needed for
 # `check`). Both need `--all-targets`: without it the `*_tests.rs` files are
 # not compiled, and a `cfg`-gated test referring to something that has been
@@ -57,8 +61,9 @@ cargo fmt --all -- --check
 cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -Dwarnings
 cargo check --target aarch64-apple-darwin --all-targets
 
-# Supply chain — run before adding or updating any dependency
-cargo deny check licenses bans sources
+# Supply chain — run before adding or updating any dependency. `advisories`
+# also runs weekly in CI, since the database changes with no commit here.
+cargo deny check licenses bans sources advisories
 
 # MSRV — pin to the exact floor `rust-version` in Cargo.toml declares. Needs
 # `rustup toolchain install 1.88.0` once; `cargo clippy --all-targets` alone
@@ -83,15 +88,20 @@ Single crate, edition 2024, `rust-version = 1.88.0`.
 - `types.rs` — `Ino`, `FileHandle`, `FileAttr`, `DirEntry`, `FileKind`,
   `StatFs`. `FileKind` has only `File` and `Directory`; there is no symlink
   variant.
-- `error.rs` — `FsError`, mapped to `errno` on Unix and to `HRESULT`/`NTSTATUS`
-  on Windows. `FsError::context` attaches an explanation while keeping the
-  underlying errno.
+- `error.rs` — `FsError`, mapped to `errno` (available on every platform, not
+  only Unix, so the public surface has one shape everywhere) and to
+  `HRESULT`/`NTSTATUS` on Windows. `FsError::context` attaches an explanation
+  while keeping the underlying errno. `From<FsError> for io::Error` returns an
+  `FsError::Io` whole rather than rebuilding it, so its raw OS error survives.
 - `mount.rs` — `MountBuilder` and `Mount`. `Mount` unmounts on drop;
   `Mount::unmount` surfaces the errors that drop swallows.
 - `backend/` — one module per OS mechanism, `cfg`-gated *and* feature-gated:
-  `fuse.rs` (Linux only), `nfs/` (macOS only — a submodule tree: `mod.rs`,
-  `xdr.rs`, `rpc.rs`, `mount_proto.rs`, `nfs_proto.rs`, `handle.rs`,
-  `server.rs`), `cfapi.rs` (Windows). `backend/mod.rs` resolves
+  `fuse.rs` (Linux only), `nfs/` (a submodule tree: `mod.rs`, `xdr.rs`,
+  `rpc.rs`, `mount_proto.rs`, `nfs_proto.rs`, `handle.rs`, `server.rs`),
+  `cfapi.rs` (Windows). Only `nfs::mount` and `NfsHandle` are macOS-gated; the
+  wire layer around them builds and tests on any Unix, for the same reason
+  `readdir.rs` is unconditional — see "The NFS wire layer" below.
+  `backend/mod.rs` resolves
   `Backend::Auto`; it and its sibling modules hold the seams every backend
   shares, so a backend supplies only a `mount` function, a `Mounted` impl and
   a `Caps`:
@@ -101,11 +111,13 @@ Single crate, edition 2024, `rust-version = 1.88.0`.
     guarantee the crate makes uniformly; a backend needs no `Drop` and no
     idempotence flag of its own.
   - `preflight.rs` — `Caps` (what a backend can honor) and `check`, run
-    before any platform code. See "Unsupported builder options" below.
+    before any platform code. Covers `allow_other`, `auto_unmount`, `threads`,
+    and whether the mountpoint must be empty. See "Unsupported builder
+    options" below.
   - `readdir.rs` — the `.`/`..` cookie arithmetic *and* `emit`, the driver
     that walks one paginated, resumable listing. `fuse.rs` and
-    `nfs/nfs_proto.rs` differ only in their `Sink` closure; cfapi will pass
-    `Dots::Omit` and reuse the pagination alone. Compiled and tested
+    `nfs/nfs_proto.rs` differ only in their `Sink` closure; `cfapi.rs` passes
+    `Dots::Omit` and reuses the pagination alone. Compiled and tested
     unconditionally rather than gated to a backend.
   - `trace.rs` — `backend_warn!`/`backend_info!`, no-ops without the
     `tracing` feature. Use these where an error is deliberately discarded
@@ -130,14 +142,48 @@ without revisiting that:
 
 ## Platform constraints worth knowing before editing a backend
 
-**Unsupported builder options are a hard error, not a no-op.** `allow_other`
-and `auto_unmount` are FUSE mount options with no NFS or cfapi counterpart.
-Rather than silently ignoring them off Linux, each backend declares a `Caps`
-and `preflight` (`backend/mod.rs`) rejects the request at `mount()` naming the
-backend. `preflight` also checks the mountpoint exists and is a directory, so
-all three platforms report the same actionable error instead of passing
-through whatever their helper binary prints. A new backend adds a `Caps`, not
-a fourth policy.
+**Unsupported builder options are a hard error, not a no-op.** `allow_other`,
+`auto_unmount` and `threads` are FUSE-only — the first two are FUSE mount
+options with no NFS or cfapi counterpart, and FUSE is the only backend that
+owns a worker pool. Rather than silently ignoring them off Linux, each backend
+declares a `Caps` and `preflight` (`backend/preflight.rs`) rejects the request
+at `mount()` naming the backend. `preflight` also checks the mountpoint exists
+and is a directory, so all three platforms report the same actionable error
+instead of passing through whatever their helper binary prints. A new backend
+adds a `Caps`, not a fourth policy.
+
+**cfapi requires an empty mountpoint, and clears it on unmount.** A sync root
+projects placeholders *into* the directory rather than covering it the way a
+Unix mount does, so mounting over existing files would destroy them.
+`Caps::empty_mountpoint` is how that is enforced, and
+`remove_leftover_placeholders` deletes only entries still carrying
+`FILE_ATTRIBUTE_REPARSE_POINT`. Do not widen that check to "delete everything
+found here" — that was the pre-1.0 behaviour and it was a data-loss bug.
+
+**cfapi's placeholder descriptors must outlive the `CfExecute` call that reads
+them.** `CF_PLACEHOLDER_CREATE_INFO` holds raw pointers with no lifetime, so
+the compiler cannot check this. `Placeholders::with_descriptors` builds the
+array and borrows its backing store for the duration of the call; a function
+that *returns* the array hands back dangling pointers instead. Do not
+reintroduce one.
+
+**`ReadOnlyFs::readdir` may return a partial page.** An empty result is the
+only end-of-directory signal, and `backend/readdir.rs`'s `emit` loops until it
+gets one. A backend must never call `fs.readdir` directly and treat the result
+as the whole tail: NFS turns one `emit` call into one `dirlist3` and cfapi into
+one `TRANSFER_PLACEHOLDERS`, so a short page there reads as a complete
+directory, with no error to show for it. FUSE hides this — its kernel client
+reissues `readdir` from the last cookie regardless — so a mount smoke test on
+Linux will not catch it. Test paging at the `emit` or procedure layer instead.
+
+**The NFS wire layer builds on any Unix, not only macOS.** `xdr.rs`, `rpc.rs`,
+`handle.rs`, `mount_proto.rs`, `nfs_proto.rs` and `server.rs` contain no macOS
+API, so they compile and test wherever `cargo test` runs — which is what makes
+a change to a shared seam like `readdir::emit` checkable without a Mac. They
+carry a scoped `dead_code` allow off macOS because nothing calls them there.
+`FileHandle3::new_random` stays macOS-only on purpose; tests use
+`from_secret`/`for_test` rather than a portable randomness fallback that could
+later be mistaken for a production path.
 
 **FUSE `auto_unmount` requires a non-`Owner` ACL.** `fusermount3` refuses to arm
 it on an owner-private mount, so `auto_unmount` defaults off and `mount()`
@@ -218,10 +264,25 @@ between segments. Because consecutive underscores trip `non_snake_case`, every
 **No `.unwrap()` / `.expect()` in production code** — use `?`. `clippy.toml`
 allows them in tests only. Workspace lints also warn on `cognitive_complexity`.
 
-**Public docs:** every new public item needs a doc comment. Doc examples that
-use a gated API must be `cfg`-gated too; `cargo test` runs them.
+**Public docs:** every new public item needs a doc comment — `missing_docs` is
+on, so this is enforced rather than asked for. Doc examples that use a gated
+API must be `cfg`-gated too; `cargo test` runs them. `README.md`'s example is
+compiled as a doctest via `#[cfg(doctest)]` in `lib.rs`, so it cannot drift.
+Rustdoc must not link to a repository-relative path like `docs/GAPS.md` — a
+docs.rs reader cannot follow one; use the absolute GitHub URL there and keep
+relative links in the Markdown files.
 
 **Errors:** `thiserror`, in `error.rs`. `FsError` is `#[non_exhaustive]`.
+
+**The public API is frozen at 1.0.** `ReadOnlyFs`'s method set, the value types
+in `types.rs`, `MountBuilder` and `Mount` do not change shape without a major
+version. `Backend` and `FsError` are `#[non_exhaustive]` so a variant can be
+added; the value types deliberately are not, so implementors can keep building
+them with struct literals — that was weighed before 1.0 and declined, and is
+not planned for revisiting. Adding a field to `FileAttr` or a variant to
+`FileKind` is a 2.0, not a minor release. Additive changes (a new default trait
+method, a new builder option, a new trait impl) are minor releases and need a
+`CHANGELOG.md` entry.
 
 **Unsafe:** the crate is `#![forbid(unsafe_op_in_unsafe_fn)]`. FFI calls need an
 explicit `// SAFETY:` comment saying why the call is sound — what the arguments
@@ -275,12 +336,15 @@ Before considering any task or phase complete:
 
 - `cargo test` passes with zero failures
 - `cargo clippy --all-targets -- -Dwarnings` is clean
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` is clean (broken intra-doc
+  links fail CI)
 - `cargo fmt --all -- --check` is clean
-- `cargo deny check licenses bans sources` passes
+- `cargo deny check licenses bans sources advisories` passes
 - The two cross-compile checks pass
 - `cargo +1.88.0 check --all-targets` (MSRV) passes
 - No `.unwrap()` / `.expect()` in production code
-- New public items have doc comments
+- New public items have doc comments (`missing_docs` catches this)
+- `CHANGELOG.md` has an entry for anything a user would notice
 - If behaviour changed on a platform, it was verified with real tools there, or
   the fact that it was not is stated plainly
 - Anything touching `backend/mod.rs`, `backend/readdir.rs` or a `Mounted` impl
@@ -296,7 +360,13 @@ across them:
 | `README.md` | What the crate does, how to use it, and the caveats that change how it should be used | Link out rather than expand |
 | `docs/PLAN.md` | Phases, decisions and their rationale, open questions | The plan of record; update when a phase closes or a decision changes |
 | `docs/GAPS.md` | Every known limitation, why it exists, and what changing it costs | One section per gap. Add to it rather than quietly narrowing scope |
+| `CHANGELOG.md` | What changed in each release, and enough of why to act on it | Keep a Changelog format. One entry per released version |
+| `SECURITY.md` | How to report a vulnerability, and what is in scope | Reporting process and scope, not a list of known issues — those go in `docs/GAPS.md` |
 | `CLAUDE.md` | Conventions and constraints a contributor needs before editing | Rules, not narrative |
+
+`docs/macos_nfs_plan.md` and `docs/v1-readiness.md` are closed working
+documents, kept for their reasoning and excluded from the published package.
+Neither is updated; anything still true belongs in the files above.
 
 ## Writing style for `README.md`, `docs/*.md` and rustdoc
 

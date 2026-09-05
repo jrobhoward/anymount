@@ -9,7 +9,6 @@
 //! request observed in the spike fits in one fragment.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
 
 use super::xdr::{Reader, Writer};
 
@@ -31,7 +30,12 @@ pub(super) mod accept_stat {
 /// Read one length-prefixed RPC message body. `Ok(None)` on a clean EOF
 /// before any header byte arrives; `Err` on a short read mid-message, a
 /// fragment marked non-final (unsupported in v1), or an oversized length.
-pub(super) fn read_message(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
+///
+/// Generic over [`Read`] rather than taking a `TcpStream`: this is the code
+/// that parses untrusted bytes off a socket, and the framing rules it enforces
+/// are worth testing against a byte slice rather than only against a live
+/// connection.
+pub(super) fn read_message<R: Read>(stream: &mut R) -> io::Result<Option<Vec<u8>>> {
     let mut hdr = [0u8; 4];
     if !read_exact_or_eof(stream, &mut hdr)? {
         return Ok(None);
@@ -55,7 +59,7 @@ pub(super) fn read_message(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>
 /// Reads into `buf`, returning `Ok(true)` on success, `Ok(false)` if the
 /// stream was already at EOF, and `Err` on a short read after some bytes
 /// were received.
-fn read_exact_or_eof(stream: &mut TcpStream, buf: &mut [u8]) -> io::Result<bool> {
+fn read_exact_or_eof<R: Read>(stream: &mut R, buf: &mut [u8]) -> io::Result<bool> {
     let mut filled = 0;
     while filled < buf.len() {
         let n = stream.read(&mut buf[filled..])?;
@@ -72,7 +76,7 @@ fn read_exact_or_eof(stream: &mut TcpStream, buf: &mut [u8]) -> io::Result<bool>
 }
 
 /// Write one length-prefixed RPC message, as a single final fragment.
-pub(super) fn write_message(stream: &mut TcpStream, body: &[u8]) -> io::Result<()> {
+pub(super) fn write_message<W: Write>(stream: &mut W, body: &[u8]) -> io::Result<()> {
     let hdr = LAST_FRAGMENT_BIT | (body.len() as u32);
     stream.write_all(&hdr.to_be_bytes())?;
     stream.write_all(body)?;
@@ -204,3 +208,7 @@ pub(super) fn prog_mismatch_reply(xid: u32) -> Vec<u8> {
     write_prog_mismatch_body(&mut w, 3, 3);
     w.into_bytes()
 }
+
+#[cfg(test)]
+#[path = "rpc_tests.rs"]
+mod rpc_tests;

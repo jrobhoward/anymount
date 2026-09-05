@@ -15,9 +15,9 @@
 //! sink that always accepts, reusing the pagination alone.
 //!
 //! Compiled and tested unconditionally rather than gated to a backend. Nothing
-//! here calls into a platform API, and the tests are the same on every target;
-//! the `allow` below is for the Windows build alone, where the cfapi backend is
-//! still the Phase 2 stub and so calls none of it yet.
+//! here calls into a platform API, and the tests are the same on every target,
+//! so the `allow` below covers the builds where no compiled-in backend calls
+//! a given item.
 
 #![allow(dead_code)]
 
@@ -50,9 +50,10 @@ pub(crate) fn for_entry(trait_offset: u64) -> u64 {
 /// placeholder enumeration has no equivalent, hence [`Omit`](Dots::Omit).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Dots {
+    /// Emit `.` and `..` ahead of the directory's own entries.
     Synthesize,
-    /// Constructed only by the tests until `backend/cfapi.rs`'s enumeration
-    /// callback lands (`docs/PLAN.md`, Phase 2), which is what it exists for.
+    /// Emit only the directory's own entries. What `backend/cfapi.rs`'s
+    /// placeholder enumeration passes.
     Omit,
 }
 
@@ -82,6 +83,24 @@ pub(crate) struct Entry<'a> {
 /// Returns `true` when the listing was exhausted, and `false` when the sink
 /// reported [`Sink::Full`] first — the distinction NFS needs for `dirlist3`'s
 /// `eof` flag, and the signal to a caller that another call is coming.
+///
+/// # Pagination
+///
+/// [`ReadOnlyFs::readdir`] may return a partial page, so this calls it in a
+/// loop, advancing the offset by the number of entries each call yields, and
+/// stops only on an empty page or a full sink.
+///
+/// Calling it once and treating the result as the whole tail truncates a
+/// paging implementation wherever one pass through `emit` produces one
+/// complete reply — a `dirlist3` on NFS, a `TRANSFER_PLACEHOLDERS` on cfapi —
+/// and does so invisibly, since a short reply is indistinguishable from a
+/// short directory. FUSE is the exception that makes this easy to miss: its
+/// kernel client reissues `readdir` from the last cookie whether or not the
+/// reply claimed to be complete, so it re-drives the listing itself.
+///
+/// The loop terminates because every non-empty page advances the offset; an
+/// implementation that ignores the offset and returns the same page forever
+/// describes an infinite directory, which no calling convention can rescue.
 ///
 /// `..`'s inode is resolved best-effort with `lookup(dir, "..")`, falling back
 /// to `dir` itself when the implementation does not answer that name.
@@ -130,19 +149,26 @@ where
         }
     }
 
-    let offset = trait_offset(cookie);
-    for (i, entry) in fs.readdir(dir, offset)?.iter().enumerate() {
-        let offered = Entry {
-            ino: entry.ino,
-            name: &entry.name,
-            kind: entry.kind,
-            cookie: for_entry(offset + i as u64),
-        };
-        if sink(offered) == Sink::Full {
-            return Ok(false);
+    let mut offset = trait_offset(cookie);
+    loop {
+        let page = fs.readdir(dir, offset)?;
+        if page.is_empty() {
+            return Ok(true);
+        }
+
+        for entry in &page {
+            let offered = Entry {
+                ino: entry.ino,
+                name: &entry.name,
+                kind: entry.kind,
+                cookie: for_entry(offset),
+            };
+            if sink(offered) == Sink::Full {
+                return Ok(false);
+            }
+            offset += 1;
         }
     }
-    Ok(true)
 }
 
 #[cfg(test)]

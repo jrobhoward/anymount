@@ -71,6 +71,18 @@ pub trait ReadOnlyFs: Send + Sync + 'static {
     /// List directory `ino`, skipping the first `offset` entries.
     ///
     /// `.` and `..` are synthesised by the backend and must not be returned.
+    ///
+    /// Returning fewer than all the remaining entries is allowed: the backend
+    /// calls this again with a higher `offset` until it gets an empty result.
+    /// An empty return is therefore the *only* way to say "no more entries" —
+    /// a short page is read as "ask again", so an implementation must never
+    /// use one to signal the end of a directory. A page must contain at least
+    /// one entry whenever entries remain at `offset`.
+    ///
+    /// Paging is worth doing for a directory large enough that materialising
+    /// the whole tail on every call costs real work: FUSE asks for a few
+    /// kilobytes at a time, so an unpaged implementation rebuilds the
+    /// remainder of a large directory once per call.
     fn readdir(&self, ino: Ino, offset: u64) -> Result<Vec<DirEntry>>;
 
     /// Open file `ino`, returning a handle for subsequent reads.

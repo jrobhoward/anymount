@@ -37,10 +37,10 @@
 //!
 //! `CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS` carries no size budget (confirmed in
 //! the Phase 2 spike, unlike NFS's `READDIR`), so [`readdir::emit`] is used
-//! with [`Dots::Omit`] and a sink that always accepts — [`ReadOnlyFs::readdir`]
-//! is documented to return every remaining entry from a given offset, not a
-//! capped page, so one call is the whole listing, sent back in one
-//! `CF_OPERATION_TYPE_TRANSFER_PLACEHOLDERS` call.
+//! with [`Dots::Omit`] and a sink that always accepts. [`ReadOnlyFs::readdir`]
+//! may still page, and `emit` walks those pages, so the sink sees the whole
+//! directory however the implementation chose to hand it over; it is then sent
+//! back in one `CF_OPERATION_TYPE_TRANSFER_PLACEHOLDERS` call.
 
 use std::ffi::c_void;
 use std::mem::{offset_of, size_of};
@@ -67,7 +67,8 @@ use windows::Win32::Storage::CloudFilters::{
     CfRegisterSyncRoot, CfUnregisterSyncRoot,
 };
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_BASIC_INFO,
 };
 use windows::core::{GUID, HRESULT, PCWSTR};
 
@@ -82,10 +83,17 @@ use crate::types::{FileAttr, FileHandle, FileKind, Ino, ROOT_INO};
 /// `allow_other` and `auto_unmount` are FUSE mount options with no cfapi
 /// counterpart: a sync root is registered by, and visible to, the user running
 /// the process, and teardown is owned by [`Mounted`].
+///
+/// `empty_mountpoint` is the one cap this backend does claim. Unlike a Unix
+/// mount, a sync root does not cover the directory — placeholders are created
+/// inside it, and [`remove_leftover_placeholders`] clears them on unmount —
+/// so anything already there would be destroyed.
 const CAPS: Caps = Caps {
     name: "cfapi",
     allow_other: false,
     auto_unmount: false,
+    empty_mountpoint: true,
+    threads: false,
 };
 
 /// Identifies `anymount` as a Cloud Files provider. Only has to be stable and
@@ -158,12 +166,30 @@ impl<F: ReadOnlyFs> Mounted for CfApiHandle<F> {
 }
 
 /// Best-effort cleanup after `CfUnregisterSyncRoot`: placeholder entries this
-/// backend created remain on disk as ordinary reparse-point stubs once the
-/// provider disconnects, and nothing else will ever reclaim them. Removing
-/// them here is what lets [`unmount`](Mounted::unmount) honor [`Mounted`]'s
-/// "leaves nothing behind" contract. Failures are logged, not propagated,
-/// matching every other best-effort cleanup in this crate (a failed
-/// `release`, a failed unmount during `drop`).
+/// backend created remain on disk as reparse-point stubs once the provider
+/// disconnects, and nothing else will ever reclaim them. Removing them here is
+/// what lets [`unmount`](Mounted::unmount) honor [`Mounted`]'s "leaves nothing
+/// behind" contract. Failures are logged, not propagated, matching every other
+/// best-effort cleanup in this crate (a failed `release`, a failed unmount
+/// during `drop`).
+///
+/// # Why this is narrow
+///
+/// This function deletes files, so it deletes as little as it can. Two things
+/// bound it. The mountpoint was required to be empty at mount time
+/// ([`CAPS`]), so anything found here should be this backend's own work; and
+/// each entry must still carry `FILE_ATTRIBUTE_REPARSE_POINT`, which a
+/// placeholder does and an ordinary file does not. An entry failing that test
+/// is left alone and logged rather than removed — leaving a stray file behind
+/// costs a warning and a failed emptiness check at the next mount, while
+/// deleting the wrong one costs a user their data. Given that trade, being
+/// too cautious is the correct way to be wrong.
+///
+/// The precise cloud reparse tag is not checked. Reading it needs
+/// `GetFileInformationByHandleEx(FileAttributeTagInfo)` and a handle opened
+/// with `FILE_FLAG_OPEN_REPARSE_POINT` — more FFI and more unsafe than the
+/// remaining risk justifies, given an empty mountpoint is already a
+/// precondition.
 fn remove_leftover_placeholders(mountpoint: &Path) {
     let entries = match std::fs::read_dir(mountpoint) {
         Ok(entries) => entries,
@@ -178,6 +204,27 @@ fn remove_leftover_placeholders(mountpoint: &Path) {
 
     for entry in entries.flatten() {
         let path = entry.path();
+
+        match entry.metadata() {
+            Ok(meta) if is_reparse_point(&meta) => {}
+            Ok(_) => {
+                backend_warn!(
+                    "anymount/cfapi: leaving {} in place after unmount: it is not a \
+                     placeholder, so this backend did not create it",
+                    path.display()
+                );
+                continue;
+            }
+            Err(e) => {
+                backend_warn!(
+                    "anymount/cfapi: leaving {} in place after unmount: its attributes \
+                     could not be read, so it cannot be confirmed as a placeholder: {e}",
+                    path.display()
+                );
+                continue;
+            }
+        }
+
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let result = if is_dir {
             std::fs::remove_dir_all(&path)
@@ -193,11 +240,26 @@ fn remove_leftover_placeholders(mountpoint: &Path) {
     }
 }
 
+/// Does this entry carry `FILE_ATTRIBUTE_REPARSE_POINT`?
+///
+/// Every placeholder cfapi creates does; an ordinary file does not. Split out
+/// from [`remove_leftover_placeholders`] so the predicate is unit testable
+/// against a `Metadata` obtained from a real file.
+fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+}
+
 /// Platform version reported by `CfGetPlatformInfo`, proving `CldApi.dll` loads.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PlatformInfo {
+    /// Windows build number.
     pub build: u32,
+    /// Windows revision number within that build.
     pub revision: u32,
+    /// Cloud Files integration number. The value that gates newer features:
+    /// the unrestricted placeholder-management policies need `0x310` or
+    /// higher.
     pub integration: u32,
 }
 
@@ -411,29 +473,72 @@ fn handle_fetch_placeholders<F: ReadOnlyFs>(info: &CF_CALLBACK_INFO) {
     };
 
     match list_placeholders(&context.fs, dir) {
-        Ok(mut infos) => transfer_placeholders(info, &mut infos, 0),
+        // The listing stays owned across this call: `with_descriptors` holds
+        // the buffers cfapi reads through for exactly as long as `CfExecute`
+        // can touch them.
+        Ok(listing) => listing.with_descriptors(|infos| transfer_placeholders(info, infos, 0)),
         Err(e) => transfer_placeholders(info, &mut [], e.to_ntstatus()),
     }
 }
 
-/// Build one [`CF_PLACEHOLDER_CREATE_INFO`] per entry of `dir`, via
-/// [`readdir::emit`] with [`Dots::Omit`] — `FETCH_PLACEHOLDERS` has no `.`/`..`
-/// concept and no size budget, so the sink always accepts and the whole
-/// directory is read in one pass.
+/// One directory entry, owning the buffers a
+/// [`CF_PLACEHOLDER_CREATE_INFO`] points at.
+struct PreparedEntry {
+    identity: [u8; 8],
+    name: Vec<u16>,
+    attr: FileAttr,
+}
+
+/// A prepared directory listing: the descriptors cfapi wants, plus the
+/// buffers they point into.
+///
+/// `CF_PLACEHOLDER_CREATE_INFO` carries `RelativeFileName` and `FileIdentity`
+/// as raw pointers with no lifetime attached, so nothing in the type system
+/// stops the buffers behind them from being dropped while the descriptors are
+/// still in use. [`with_descriptors`](Self::with_descriptors) is the only way
+/// to obtain the array, and it borrows `self` for the whole call, so the
+/// backing store is provably alive for as long as cfapi can read through it.
+/// Building the descriptors in a function that returned them would hand back
+/// dangling pointers instead, which no compiler check would catch.
+struct Placeholders {
+    entries: Vec<PreparedEntry>,
+}
+
+impl Placeholders {
+    /// Build the descriptor array and run `f` with it, keeping the buffers it
+    /// points into borrowed for the duration.
+    fn with_descriptors<R>(&self, f: impl FnOnce(&mut [CF_PLACEHOLDER_CREATE_INFO]) -> R) -> R {
+        let mut infos: Vec<CF_PLACEHOLDER_CREATE_INFO> = self
+            .entries
+            .iter()
+            .map(|e| to_create_info(&e.name, &e.identity, &e.attr))
+            .collect();
+        f(&mut infos)
+    }
+}
+
+/// Prepare one entry per child of `dir`, via [`readdir::emit`] with
+/// [`Dots::Omit`] — `FETCH_PLACEHOLDERS` has no `.`/`..` concept and no size
+/// budget, so the sink always accepts and the listing is paged only because
+/// [`ReadOnlyFs::readdir`] is allowed to return a partial page.
 ///
 /// An entry whose `getattr` fails is skipped and logged rather than failing
 /// the whole listing: better an incomplete directory than none at all.
-fn list_placeholders<F: ReadOnlyFs>(fs: &F, dir: Ino) -> Result<Vec<CF_PLACEHOLDER_CREATE_INFO>> {
+fn list_placeholders<F: ReadOnlyFs>(fs: &F, dir: Ino) -> Result<Placeholders> {
     let mut listed = Vec::new();
     readdir::emit(fs, dir, 0, Dots::Omit, |entry| {
         listed.push((entry.ino, entry.name.to_os_string()));
         Sink::Accepted
     })?;
 
-    let mut prepared = Vec::with_capacity(listed.len());
+    let mut entries = Vec::with_capacity(listed.len());
     for (ino, name) in listed {
         match fs.getattr(ino) {
-            Ok(attr) => prepared.push((ino.0.to_le_bytes(), to_wide(&name), attr)),
+            Ok(attr) => entries.push(PreparedEntry {
+                identity: ino.0.to_le_bytes(),
+                name: to_wide(&name),
+                attr,
+            }),
             Err(e) => backend_warn!(
                 "anymount/cfapi: getattr for {} failed, omitting it: {e}",
                 name.to_string_lossy()
@@ -441,13 +546,7 @@ fn list_placeholders<F: ReadOnlyFs>(fs: &F, dir: Ino) -> Result<Vec<CF_PLACEHOLD
         }
     }
 
-    // `prepared` does no further push past this point, so the addresses
-    // `to_create_info` borrows from its elements stay valid for the
-    // `CfExecute` call in `transfer_placeholders`.
-    Ok(prepared
-        .iter()
-        .map(|(id, name, attr)| to_create_info(name, id, attr))
-        .collect())
+    Ok(Placeholders { entries })
 }
 
 fn to_create_info(
@@ -572,10 +671,7 @@ fn handle_fetch_data<F: ReadOnlyFs>(info: &CF_CALLBACK_INFO, params: &CF_CALLBAC
     };
 
     if let Err(e) = stream_fetch(&context.fs, info, ino, offset, length) {
-        backend_warn!(
-            "anymount/cfapi: fetching data for ino {} failed: {e}",
-            ino.0
-        );
+        backend_warn!("anymount/cfapi: fetching data for ino {ino} failed: {e}");
     }
 }
 
@@ -600,7 +696,7 @@ fn stream_fetch<F: ReadOnlyFs>(
     let fh = fs.open(ino)?;
     let result = stream_chunks(fs, info, fh, offset, length);
     if let Err(e) = fs.release(fh) {
-        backend_warn!("anymount/cfapi: release of ino {} failed: {e}", ino.0);
+        backend_warn!("anymount/cfapi: release of ino {ino} failed: {e}");
     }
     result
 }

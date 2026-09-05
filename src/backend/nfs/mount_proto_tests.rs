@@ -25,14 +25,14 @@ fn status_of(outcome: ProcOutcome) -> u32 {
 
 #[test]
 fn mnt____correct_export_path____succeeds_with_root_handle() {
-    let handle = FileHandle3::new_random();
+    let handle = FileHandle3::for_test(1);
     let path = format!("{EXPORT_PREFIX}{}", handle.secret_hex());
     assert_eq!(status_of(call_mnt(&handle, &path)), MNT3_OK);
 }
 
 #[test]
 fn mnt____malformed_path____is_noent() {
-    let handle = FileHandle3::new_random();
+    let handle = FileHandle3::for_test(1);
     assert_eq!(
         status_of(call_mnt(&handle, "/not/an/export")),
         MNT3ERR_NOENT
@@ -41,7 +41,7 @@ fn mnt____malformed_path____is_noent() {
 
 #[test]
 fn mnt____right_shape_wrong_secret____is_acces() {
-    let handle = FileHandle3::new_random();
+    let handle = FileHandle3::for_test(1);
     let wrong = "0".repeat(32);
     let path = format!("{EXPORT_PREFIX}{wrong}");
     assert_eq!(status_of(call_mnt(&handle, &path)), MNT3ERR_ACCES);
@@ -53,7 +53,7 @@ fn umnt____any_path____is_accepted_unconditionally() {
     w.write_string(std::ffi::OsStr::new("/export/whatever"));
     let bytes = w.into_bytes();
     let mut r = Reader::new(&bytes);
-    let handle = FileHandle3::new_random();
+    let handle = FileHandle3::for_test(1);
     assert!(matches!(
         dispatch(3, &mut r, &handle),
         ProcOutcome::Success(_)
@@ -64,7 +64,7 @@ fn umnt____any_path____is_accepted_unconditionally() {
 fn export____no_args____returns_empty_list() {
     let bytes: [u8; 0] = [];
     let mut r = Reader::new(&bytes);
-    let handle = FileHandle3::new_random();
+    let handle = FileHandle3::for_test(1);
     let outcome = dispatch(5, &mut r, &handle);
     assert!(matches!(outcome, ProcOutcome::Success(_)));
 }
@@ -73,7 +73,7 @@ fn export____no_args____returns_empty_list() {
 fn dispatch____unknown_proc____is_proc_unavail() {
     let bytes: [u8; 0] = [];
     let mut r = Reader::new(&bytes);
-    let handle = FileHandle3::new_random();
+    let handle = FileHandle3::for_test(1);
     assert!(matches!(
         dispatch(99, &mut r, &handle),
         ProcOutcome::ProcUnavail

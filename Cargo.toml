@@ -1,16 +1,32 @@
 [package]
 name = "anymount"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.88.0"
 license = "MIT OR Apache-2.0"
 authors = ["James Howard <jrobhoward@gmail.com>"]
-description = "Cross-platform read-only userspace filesystems: FUSE on Linux, Cloud Files on Windows"
+description = "Cross-platform read-only userspace filesystems: FUSE on Linux, NFS on macOS, Cloud Files on Windows"
 repository = "https://github.com/jrobhoward/anymount"
 homepage = "https://github.com/jrobhoward/anymount"
-keywords = ["filesystem", "fuse", "cfapi", "mount", "userspace"]
+keywords = ["filesystem", "fuse", "nfs", "cfapi", "mount"]
 categories = ["filesystem", "os"]
 readme = "README.md"
+# Working documents kept in the repository for their reasoning, but not part
+# of what the crate ships: a historical spike write-up and a closed review.
+exclude = ["docs/macos_nfs_plan.md", "docs/v1-readiness.md"]
+
+# docs.rs builds for x86_64-unknown-linux-gnu by default, which would publish
+# only the Linux backend's surface for a crate whose point is spanning three
+# platforms. Build for one target per backend, with every feature on, and
+# enable `doc_cfg` so each item shows the platform it belongs to.
+[package.metadata.docs.rs]
+all-features = true
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["fuse", "cfapi", "nfs"]

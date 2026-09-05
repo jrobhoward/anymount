@@ -81,7 +81,7 @@ impl ReadOnlyFs for TestFs {
     }
 }
 
-fn ctx<'a>(fs: &'a TestFs, handle: &'a FileHandle3) -> Ctx<'a, TestFs> {
+fn ctx<'a, F: ReadOnlyFs>(fs: &'a F, handle: &'a FileHandle3) -> Ctx<'a, F> {
     Ctx {
         fs,
         handle,
@@ -148,7 +148,7 @@ fn write_op_rejection____every_mutating_proc____encodes_rofs_or_notsupp_with_cor
         (5, NFS3ERR_NOTSUPP, 4),  // READLINK3: post_op_attr only
     ];
 
-    let handle = FileHandle3::new_random();
+    let handle = FileHandle3::for_test(1);
     let fs = TestFs::with_files(0);
     let c = ctx(&fs, &handle);
 
@@ -220,7 +220,12 @@ fn decode_names_and_eof(bytes: &[u8], plus: bool) -> (Vec<String>, bool) {
     (names, eof)
 }
 
-fn readdirplus_call(fs: &TestFs, handle: &FileHandle3, cookie: u64, maxcount: u32) -> Vec<u8> {
+fn readdirplus_call<F: ReadOnlyFs>(
+    fs: &F,
+    handle: &FileHandle3,
+    cookie: u64,
+    maxcount: u32,
+) -> Vec<u8> {
     let c = ctx(fs, handle);
     let mut w = Writer::new();
     w.write_opaque_var(&handle.encode(ROOT_INO));
@@ -237,18 +242,85 @@ fn readdirplus_call(fs: &TestFs, handle: &FileHandle3, cookie: u64, maxcount: u3
 }
 
 #[test]
-fn readdirplus____budget_smaller_than_one_entry____returns_zero_entries_and_a_resumable_cookie() {
-    let handle = FileHandle3::new_random();
+fn readdirplus____budget_smaller_than_one_entry____is_toosmall_not_an_empty_listing() {
+    // An empty `NFS3_OK` listing with `eof: false` reads as "ask again", and
+    // the same call would fit nothing next time either. `NFS3ERR_TOOSMALL`
+    // tells the client to come back with a bigger buffer instead.
+    let handle = FileHandle3::for_test(1);
     let fs = TestFs::with_files(5);
     let bytes = readdirplus_call(&fs, &handle, 0, DIRLIST_OVERHEAD);
+    assert_eq!(u32::from_be_bytes(bytes[..4].try_into().unwrap()), 10_005);
+}
+
+#[test]
+fn readdirplus____budget_smaller_than_one_entry_in_an_empty_directory____is_ok_with_eof() {
+    // Nothing packed *because there was nothing to pack* is a complete
+    // listing, not a too-small buffer — but `.` and `..` are always
+    // synthesized, so even an empty directory has two entries to fit. A
+    // budget that holds them and nothing more is the case that must still
+    // report success.
+    let handle = FileHandle3::for_test(1);
+    let fs = TestFs::with_files(0);
+    let bytes = readdirplus_call(&fs, &handle, 0, 1_000_000);
     let (names, eof) = decode_names_and_eof(&bytes, true);
-    assert!(names.is_empty());
-    assert!(!eof);
+    assert_eq!(names, vec![".", ".."]);
+    assert!(eof);
+}
+
+/// A directory that hands over one entry per `readdir` call, which
+/// [`ReadOnlyFs::readdir`] permits.
+struct PagedFs {
+    total: u64,
+}
+
+impl ReadOnlyFs for PagedFs {
+    fn lookup(&self, parent: Ino, name: &OsStr) -> Result<FileAttr> {
+        if name == OsStr::new(".") || name == OsStr::new("..") {
+            return Ok(FileAttr::dir(parent));
+        }
+        Err(FsError::NotFound)
+    }
+    fn getattr(&self, ino: Ino) -> Result<FileAttr> {
+        Ok(FileAttr::dir(ino))
+    }
+    fn readdir(&self, _ino: Ino, offset: u64) -> Result<Vec<DirEntry>> {
+        Ok((offset..self.total.min(offset + 1))
+            .map(|i| DirEntry {
+                ino: Ino(100 + i),
+                name: OsString::from(format!("f{i}")),
+                kind: FileKind::File,
+            })
+            .collect())
+    }
+    fn open(&self, _ino: Ino) -> Result<FileHandle> {
+        Err(FsError::IsADirectory)
+    }
+    fn read_at(&self, _fh: FileHandle, _o: u64, _b: &mut [u8]) -> Result<usize> {
+        Err(FsError::IsADirectory)
+    }
+    fn release(&self, _fh: FileHandle) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn readdirplus____an_implementation_that_pages____is_not_reported_as_eof_after_one_page() {
+    // NFS is where a partial page did real damage: one `emit` call is one
+    // `dirlist3`, so treating a short page as the whole tail set `eof` after
+    // the first entry and the client stopped there. Unlike FUSE, whose kernel
+    // client reissues `readdir` from the last cookie regardless, nothing here
+    // asks a second time once `eof` is set.
+    let handle = FileHandle3::for_test(1);
+    let fs = PagedFs { total: 6 };
+    let bytes = readdirplus_call(&fs, &handle, 0, 1_000_000);
+    let (names, eof) = decode_names_and_eof(&bytes, true);
+    assert_eq!(names, vec![".", "..", "f0", "f1", "f2", "f3", "f4", "f5"]);
+    assert!(eof);
 }
 
 #[test]
 fn readdirplus____budget_covers_everything____returns_full_listing_with_eof_true() {
-    let handle = FileHandle3::new_random();
+    let handle = FileHandle3::for_test(1);
     let fs = TestFs::with_files(5);
     let bytes = readdirplus_call(&fs, &handle, 0, 1_000_000);
     let (names, eof) = decode_names_and_eof(&bytes, true);
@@ -271,8 +343,10 @@ fn full_listing_via_paging(fs: &TestFs, handle: &FileHandle3, maxcount: u32) -> 
         // Determine the resume cookie from how many total names have been
         // served so far: 0 -> DOT, DOT -> DOTDOT, else trait_offset(n-2).
         if !served_any {
-            // Nothing fit; a real client would need a bigger buffer. For
-            // this test, that would loop forever, so treat it as a bug.
+            // Nothing fit; a real client would need a bigger buffer, and the
+            // server now says so with NFS3ERR_TOOSMALL rather than an empty
+            // listing. Reaching here means the reply was `NFS3_OK` with no
+            // entries, which is the state that loops forever.
             panic!("readdir made no progress with maxcount={maxcount}");
         }
         cookie = match collected.len() {
@@ -296,7 +370,7 @@ proptest! {
         // realistic client misconfiguration, not a server bug.
         maxcount in (DIRLIST_OVERHEAD + 200)..2000,
     ) {
-        let handle = FileHandle3::new_random();
+        let handle = FileHandle3::for_test(1);
         let fs = TestFs::with_files(total_entries);
         let got = full_listing_via_paging(&fs, &handle, maxcount);
 

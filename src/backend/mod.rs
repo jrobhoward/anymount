@@ -29,7 +29,16 @@ use crate::mount::{Backend, Mount, MountBuilder};
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 pub(crate) mod fuse;
 
-#[cfg(all(target_os = "macos", feature = "nfs"))]
+// The NFS wire layer — XDR, ONC RPC framing, and the MOUNT and NFS procedure
+// tables — is byte manipulation with no platform API in it, so it is compiled
+// and tested on every Unix rather than only on macOS. That is the same
+// reasoning that keeps `readdir` unconditional: a change to a seam both
+// backends share should be testable without a Mac. `nfs::mount` and the
+// `NfsHandle` it returns, which shell out to `mount_nfs` and call
+// `libc::unmount`, stay macOS-only inside the module. `cfg(unix)` rather than
+// unconditional because NFS names are raw bytes, which only `OsStrExt` can
+// carry losslessly.
+#[cfg(all(unix, feature = "nfs"))]
 pub(crate) mod nfs;
 
 // Dead when every backend is cfg'd or featured out — the only configuration

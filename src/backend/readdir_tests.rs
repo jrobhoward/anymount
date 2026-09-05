@@ -100,6 +100,53 @@ impl ReadOnlyFs for FlatDir {
     }
 }
 
+/// A directory of `total` entries that hands them over `page` at a time,
+/// which [`ReadOnlyFs::readdir`] explicitly permits.
+///
+/// This is the shape [`emit`] used to mishandle: a single `readdir` call was
+/// treated as the whole remaining listing, so a paging implementation had
+/// everything past its first page silently dropped — and the reply looked like
+/// a short directory rather than an error.
+struct PagedDir {
+    total: u64,
+    page: u64,
+}
+
+impl ReadOnlyFs for PagedDir {
+    fn lookup(&self, _parent: Ino, name: &OsStr) -> Result<FileAttr> {
+        if name == OsStr::new("..") {
+            return Ok(FileAttr::dir(PARENT));
+        }
+        Err(FsError::NotFound)
+    }
+
+    fn getattr(&self, ino: Ino) -> Result<FileAttr> {
+        Ok(FileAttr::dir(ino))
+    }
+
+    fn readdir(&self, _ino: Ino, offset: u64) -> Result<Vec<DirEntry>> {
+        Ok((offset..self.total.min(offset + self.page))
+            .map(|i| DirEntry {
+                ino: Ino(100 + i),
+                name: OsString::from(format!("e{i}")),
+                kind: FileKind::File,
+            })
+            .collect())
+    }
+
+    fn open(&self, _ino: Ino) -> Result<crate::types::FileHandle> {
+        Err(FsError::IsADirectory)
+    }
+
+    fn read_at(&self, _fh: crate::types::FileHandle, _o: u64, _b: &mut [u8]) -> Result<usize> {
+        Err(FsError::IsADirectory)
+    }
+
+    fn release(&self, _fh: crate::types::FileHandle) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// A directory whose `readdir` always fails, for the error-propagation test.
 struct BrokenDir;
 
@@ -134,7 +181,7 @@ struct Call {
 /// Drives [`emit`] once with a sink that accepts exactly `capacity` entries
 /// before reporting [`Sink::Full`] — the same contract FUSE's
 /// `ReplyDirectory::add` and NFS's budget check both present.
-fn one_call(fs: &FlatDir, resume_after: u64, capacity: usize, dots: Dots) -> Call {
+fn one_call<F: ReadOnlyFs>(fs: &F, resume_after: u64, capacity: usize, dots: Dots) -> Call {
     let mut names = Vec::new();
     let mut inos = Vec::new();
     let mut last_cookie = None;
@@ -150,7 +197,7 @@ fn one_call(fs: &FlatDir, resume_after: u64, capacity: usize, dots: Dots) -> Cal
         last_cookie = Some(e.cookie);
         Sink::Accepted
     })
-    .expect("FlatDir never fails");
+    .expect("the test directories never fail");
 
     Call {
         names,
@@ -288,5 +335,65 @@ proptest! {
         let call = one_call(&fs, 0, total as usize + 2, Dots::Synthesize);
         prop_assert_eq!(call.resume_at, None);
         prop_assert_eq!(call.names, expected_names(total, Dots::Synthesize));
+    }
+}
+
+#[test]
+fn emit____readdir_returns_one_entry_at_a_time____still_serves_the_whole_listing() {
+    // The smallest page an implementation may return. An `emit` that called
+    // `readdir` once would report a one-entry directory and set eof.
+    let fs = PagedDir { total: 5, page: 1 };
+    let call = one_call(&fs, 0, usize::MAX, Dots::Synthesize);
+    assert_eq!(call.resume_at, None);
+    assert_eq!(call.names, expected_names(5, Dots::Synthesize));
+}
+
+proptest! {
+    /// However an implementation splits its directory into pages, an
+    /// unbounded sink must see exactly the same listing as one that hands
+    /// over everything at once.
+    #[test]
+    fn emit____any_page_size____serves_the_same_listing_as_an_unpaged_implementation(
+        total in 0u64..200,
+        page in 1u64..17,
+    ) {
+        let paged = one_call(&PagedDir { total, page }, 0, usize::MAX, Dots::Synthesize);
+        prop_assert_eq!(paged.resume_at, None);
+        prop_assert_eq!(paged.names, expected_names(total, Dots::Synthesize));
+    }
+
+    /// Paging must also survive being interrupted: a sink that fills up
+    /// mid-page still reassembles into the full listing across calls, with
+    /// nothing skipped or repeated at the page boundaries.
+    #[test]
+    fn emit____paged_and_buffer_limited____reassembles_the_full_listing(
+        total in 0u64..80,
+        page in 1u64..9,
+        capacity in 1usize..7,
+    ) {
+        let fs = PagedDir { total, page };
+        let mut names = Vec::new();
+        let mut resume = 0;
+        loop {
+            let call = one_call(&fs, resume, capacity, Dots::Synthesize);
+            names.extend(call.names);
+            match call.resume_at {
+                Some(cookie) => resume = cookie,
+                None => break,
+            }
+        }
+        prop_assert_eq!(names, expected_names(total, Dots::Synthesize));
+    }
+
+    /// cfapi's configuration: no dots, no budget, an implementation that
+    /// pages. One `emit` call must still produce every entry.
+    #[test]
+    fn emit____paged_with_dots_omitted____serves_every_entry_in_one_call(
+        total in 0u64..200,
+        page in 1u64..17,
+    ) {
+        let call = one_call(&PagedDir { total, page }, 0, usize::MAX, Dots::Omit);
+        prop_assert_eq!(call.resume_at, None);
+        prop_assert_eq!(call.names, expected_names(total, Dots::Omit));
     }
 }

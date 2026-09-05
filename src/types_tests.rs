@@ -36,3 +36,11 @@ fn statfs____default____reports_a_sane_block_size_and_name_length() {
     assert_eq!(s.bsize, 512);
     assert_eq!(s.namelen, 255);
 }
+
+#[test]
+fn display____an_ino_and_a_file_handle____render_as_bare_numbers() {
+    // Log lines read `ino 42`, not `ino Ino(42)`.
+    assert_eq!(Ino(42).to_string(), "42");
+    assert_eq!(FileHandle(7).to_string(), "7");
+    assert_eq!(format!("ino {}", ROOT_INO), "ino 1");
+}

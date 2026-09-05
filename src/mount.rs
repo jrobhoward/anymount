@@ -7,6 +7,13 @@ use crate::error::Result;
 use crate::fs::ReadOnlyFs;
 
 /// Which platform mechanism to mount with.
+///
+/// `#[non_exhaustive]` because a fourth backend would otherwise be a breaking
+/// change. The value types — [`FileAttr`](crate::FileAttr),
+/// [`FileKind`](crate::FileKind), [`DirEntry`](crate::DirEntry) and
+/// [`StatFs`](crate::StatFs) — deliberately are not; that was considered for
+/// 1.0 and dropped so implementors can keep building them with struct
+/// literals.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Backend {
@@ -29,6 +36,7 @@ pub struct MountBuilder {
     pub(crate) fs_name: String,
     pub(crate) allow_other: bool,
     pub(crate) auto_unmount: bool,
+    pub(crate) threads: Option<usize>,
 }
 
 impl MountBuilder {
@@ -44,6 +52,7 @@ impl MountBuilder {
             fs_name: "anymount".to_owned(),
             allow_other: false,
             auto_unmount: false,
+            threads: None,
         }
     }
 
@@ -83,6 +92,27 @@ impl MountBuilder {
     /// orderly exit needs it on no backend: dropping the [`Mount`] unmounts.
     pub fn auto_unmount(mut self, yes: bool) -> Self {
         self.auto_unmount = yes;
+        self
+    }
+
+    /// Serve kernel requests on `n` worker threads.
+    ///
+    /// Concurrency comes from serving several requests at once, not from
+    /// async, so this is the knob that decides how many
+    /// [`ReadOnlyFs`](crate::ReadOnlyFs) calls can be in flight together. The
+    /// default is four, enough that a single reader and a directory walk do
+    /// not queue behind each other without making an implementor's own
+    /// locking the bottleneck. Raising it helps only if reads are slow and
+    /// the implementation is genuinely concurrent.
+    ///
+    /// FUSE only. The NFS backend sizes itself from the connections its
+    /// client opens, and cfapi's callbacks are dispatched by the platform, so
+    /// neither has a thread count to set; asking for one is rejected at
+    /// [`mount`](Self::mount) time rather than ignored.
+    ///
+    /// `n` is clamped to at least one.
+    pub fn threads(mut self, n: usize) -> Self {
+        self.threads = Some(n.max(1));
         self
     }
 

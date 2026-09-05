@@ -1,4 +1,4 @@
-//! NFSv3 backend, macOS only.
+//! NFSv3 backend. Mounting is macOS only; the wire layer builds on any Unix.
 //!
 //! A from-scratch, unprivileged NFSv3 server (RFC 1813) plus the MOUNT
 //! protocol (RFC 1813 Appendix I) it needs, hand-rolled over `std::net`, with
@@ -11,44 +11,77 @@
 //! handle a client can present back. v1 serves only single-fragment TCP RPC
 //! messages and opens/reads/releases a fresh [`crate::ReadOnlyFs`] handle on
 //! every `READ3` rather than caching one per inode — see `docs/GAPS.md`.
+//!
+//! # What is compiled where
+//!
+//! The wire layer below — [`xdr`], [`rpc`], [`handle`], [`mount_proto`],
+//! [`nfs_proto`] and [`server`] — is byte manipulation and `std::net`, with no
+//! macOS API in it, so it compiles and tests on every Unix. Only [`mount`] and
+//! [`NfsHandle`] are macOS-gated: those are the parts that run `mount_nfs` and
+//! call `libc::unmount`. Off macOS nothing calls the wire layer, hence the
+//! scoped `dead_code` allow on each module rather than a blanket one.
 
+#[cfg(target_os = "macos")]
 use std::io;
+#[cfg(target_os = "macos")]
 use std::net::TcpListener;
+#[cfg(target_os = "macos")]
 use std::process::Command;
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
 use std::thread::JoinHandle;
 
+#[cfg(target_os = "macos")]
 use crate::backend::Mounted;
+#[cfg(target_os = "macos")]
 use crate::backend::preflight::{self, Caps};
+#[cfg(target_os = "macos")]
 use crate::error::{FsError, Result};
+#[cfg(target_os = "macos")]
 use crate::fs::ReadOnlyFs;
+#[cfg(target_os = "macos")]
 use crate::mount::{Backend, MountBuilder};
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod handle;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mount_proto;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod nfs_proto;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod rpc;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod server;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod xdr;
 
+#[cfg(target_os = "macos")]
 use handle::FileHandle3;
 
 /// ONC RPC program number for the MOUNT protocol (RFC 1813 Appendix I).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MOUNT_PROG: u32 = 100_005;
 /// ONC RPC program number for NFS (RFC 1813 §2).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const NFS_PROG: u32 = 100_003;
 
 /// `allow_other` and `auto_unmount` are FUSE mount options with no NFS
 /// counterpart: this server binds to loopback and authorizes with the handle
 /// secret rather than by uid, and teardown is owned by [`Mounted`].
+#[cfg(target_os = "macos")]
 const CAPS: Caps = Caps {
     name: "nfs",
     allow_other: false,
     auto_unmount: false,
+    empty_mountpoint: false,
+    threads: false,
 };
 
 /// A live NFS mount: the client-side mount plus the server thread behind it.
+#[cfg(target_os = "macos")]
 #[derive(Debug)]
 pub(crate) struct NfsHandle {
     mountpoint: std::path::PathBuf,
@@ -56,6 +89,7 @@ pub(crate) struct NfsHandle {
     server_thread: JoinHandle<()>,
 }
 
+#[cfg(target_os = "macos")]
 impl Mounted for NfsHandle {
     /// The client-side mount is torn down first, so no new request can arrive;
     /// only then is the server stopped, so nothing is left in-flight to hang
@@ -93,6 +127,7 @@ impl Mounted for NfsHandle {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<NfsHandle> {
     preflight::check(&builder, &CAPS)?;
 

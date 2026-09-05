@@ -21,6 +21,7 @@ use super::xdr::{Reader, Writer};
 const NFS3_OK: u32 = 0;
 const NFS3ERR_NOENT: u32 = 2;
 const NFS3ERR_ROFS: u32 = 30;
+const NFS3ERR_TOOSMALL: u32 = 10_005;
 const NFS3ERR_NOTSUPP: u32 = 10_004;
 
 const FTYPE_REG: u32 = 1;
@@ -249,7 +250,7 @@ fn access<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>) -> ProcOutcome {
 /// failed release has no place in the reply, so it is logged.
 fn release_logging<F: ReadOnlyFs>(ctx: &Ctx<'_, F>, fh: crate::types::FileHandle) {
     if let Err(e) = ctx.fs.release(fh) {
-        backend_warn!("anymount/nfs: release of handle {} failed: {e}", fh.0);
+        backend_warn!("anymount/nfs: release of handle {fh} failed: {e}");
     }
 }
 
@@ -289,7 +290,13 @@ fn read<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>) -> ProcOutcome {
                         None => write_post_op_attr_absent(&mut w),
                     }
                     w.write_u32(n as u32);
-                    let eof = attr.as_ref().is_some_and(|a| offset + n as u64 >= a.size);
+                    // `offset` comes off the wire, so a client near
+                    // `u64::MAX` must not overflow this: a panic here kills
+                    // the connection's worker thread, and a wrap reports the
+                    // wrong `eof`.
+                    let eof = attr
+                        .as_ref()
+                        .is_some_and(|a| offset.saturating_add(n as u64) >= a.size);
                     w.write_bool(eof);
                     w.write_opaque_var(&buf);
                 }
@@ -316,6 +323,10 @@ struct DirList {
     /// `true` only once the trait's `readdir` truly ran out of entries to
     /// serve, not merely because the budget was exhausted this call.
     eof: bool,
+    /// How many entries were packed. Zero with `eof: false` means the
+    /// client's budget could not hold even one entry — see
+    /// [`readdir_common`].
+    packed: usize,
 }
 
 fn encode_dirent<F: ReadOnlyFs>(
@@ -364,6 +375,7 @@ fn build_dirlist<F: ReadOnlyFs>(
 ) -> Result<DirList, FsError> {
     let mut entries = Writer::new();
     let mut remaining = i64::from(budget);
+    let mut packed = 0usize;
 
     let eof = readdir::emit(ctx.fs, dir, start_cookie, readdir::Dots::Synthesize, |e| {
         let candidate = encode_dirent(ctx, e.ino, e.name, e.cookie, plus);
@@ -372,10 +384,15 @@ fn build_dirlist<F: ReadOnlyFs>(
         }
         remaining -= candidate.len() as i64;
         entries.extend_from(&candidate);
+        packed += 1;
         readdir::Sink::Accepted
     })?;
 
-    Ok(DirList { entries, eof })
+    Ok(DirList {
+        entries,
+        eof,
+        packed,
+    })
 }
 
 fn readdir_common<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>, plus: bool) -> ProcOutcome {
@@ -412,6 +429,16 @@ fn readdir_common<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>, plus: boo
 
     let budget = budget.saturating_sub(DIRLIST_OVERHEAD);
     match build_dirlist(ctx, dir, start_cookie, budget, plus) {
+        // Nothing fit, and there was something to fit: the client's `count`
+        // or `maxcount` is too small for even one entry. Answering `NFS3_OK`
+        // with an empty list and `eof: false` invites a client to reissue the
+        // same call forever, so RFC 1813 §3.3.16 has `NFS3ERR_TOOSMALL` for
+        // exactly this — it tells the client to come back with a bigger
+        // buffer rather than to come back unchanged.
+        Ok(list) if list.packed == 0 && !list.eof => {
+            w.write_u32(NFS3ERR_TOOSMALL);
+            write_post_op_attr_best_effort(&mut w, ctx, dir);
+        }
         Ok(list) => {
             w.write_u32(NFS3_OK);
             write_post_op_attr_best_effort(&mut w, ctx, dir);
@@ -440,12 +467,16 @@ fn fsstat<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>) -> ProcOutcome {
     };
     match ctx.fs.statfs() {
         Ok(s) => {
+            // Saturating, not wrapping: the counters come from the
+            // implementor, and a `StatFs` reporting an improbably large
+            // filesystem should show a saturated size rather than panic in a
+            // debug build or wrap round to a small one in a release build.
             let frsize = u64::from(s.frsize);
             w.write_u32(NFS3_OK);
             write_post_op_attr_best_effort(&mut w, ctx, ino);
-            w.write_u64(s.blocks * frsize); // tbytes
-            w.write_u64(s.bfree * frsize); // fbytes
-            w.write_u64(s.bavail * frsize); // abytes
+            w.write_u64(s.blocks.saturating_mul(frsize)); // tbytes
+            w.write_u64(s.bfree.saturating_mul(frsize)); // fbytes
+            w.write_u64(s.bavail.saturating_mul(frsize)); // abytes
             w.write_u64(s.files); // tfiles
             w.write_u64(s.ffree); // ffiles
             w.write_u64(s.ffree); // afiles

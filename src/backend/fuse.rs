@@ -37,10 +37,11 @@ const TTL: Duration = Duration::from_secs(60);
 const GENERATION: Generation = Generation(0);
 
 /// Worker threads serving kernel requests, so one slow read cannot stall the
-/// whole mount. Four is enough to keep a single reader plus a directory walk
-/// from queueing behind each other without making an implementor's locking a
-/// bottleneck.
-const WORKER_THREADS: usize = 4;
+/// whole mount, when the caller has not chosen a number with
+/// [`MountBuilder::threads`]. Four is enough to keep a single reader plus a
+/// directory walk from queueing behind each other without making an
+/// implementor's locking a bottleneck.
+const DEFAULT_WORKER_THREADS: usize = 4;
 
 /// Upper bound on a single `read` allocation.
 ///
@@ -50,10 +51,15 @@ const WORKER_THREADS: usize = 4;
 /// the remainder, so capping cannot lose data.
 const MAX_READ: u32 = 16 * 1024 * 1024;
 
+/// A FUSE mount covers the mountpoint rather than projecting into it, so
+/// prior contents are hidden for the mount's life and come back on unmount —
+/// nothing there is at risk, hence no emptiness requirement.
 const CAPS: Caps = Caps {
     name: "fuse",
     allow_other: true,
     auto_unmount: true,
+    empty_mountpoint: false,
+    threads: true,
 };
 
 /// Live FUSE session.
@@ -106,7 +112,7 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<FuseH
     } else {
         SessionACL::Owner
     };
-    config.n_threads = Some(WORKER_THREADS);
+    config.n_threads = Some(builder.threads.unwrap_or(DEFAULT_WORKER_THREADS));
     // Each worker gets its own fd (Linux 4.5+). This module is Linux-only, so
     // there is no platform to condition on.
     config.clone_fd = true;
@@ -186,8 +192,9 @@ impl<F: ReadOnlyFs> fuser::Filesystem for FuseAdapter<F> {
     ) {
         // A failed release cannot be reported usefully to the application, so
         // it is logged rather than turned into a spurious errno.
-        if let Err(e) = self.fs.release(FileHandle(fh.0)) {
-            backend_warn!("anymount/fuse: release of handle {} failed: {e}", fh.0);
+        let fh = FileHandle(fh.0);
+        if let Err(e) = self.fs.release(fh) {
+            backend_warn!("anymount/fuse: release of handle {fh} failed: {e}");
         }
         reply.ok();
     }
@@ -311,10 +318,6 @@ fn to_fuser_kind(kind: FileKind) -> fuser::FileType {
     }
 }
 
-#[cfg(test)]
-#[path = "fuse_tests.rs"]
-mod fuse_tests;
-
 fn to_fuser_attr(attr: &FileAttr) -> fuser::FileAttr {
     fuser::FileAttr {
         ino: INodeNo(attr.ino.0),
@@ -334,3 +337,7 @@ fn to_fuser_attr(attr: &FileAttr) -> fuser::FileAttr {
         flags: 0,
     }
 }
+
+#[cfg(test)]
+#[path = "fuse_tests.rs"]
+mod fuse_tests;

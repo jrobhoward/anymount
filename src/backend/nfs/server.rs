@@ -5,6 +5,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::fs::ReadOnlyFs;
@@ -19,6 +20,17 @@ use super::{MOUNT_PROG, NFS_PROG};
 /// How often the accept loop wakes to check the stop flag.
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Concurrent connections served at once.
+///
+/// The listener binds to loopback, so only local processes can reach it, and
+/// only one of them — this mount's own `mount_nfs` client — has any business
+/// connecting. Anything else is either a stray probe or a process opening
+/// sockets in a loop, and without a cap each of those costs a thread that
+/// lives until unmount. A client that has legitimately saturated this will
+/// be accepted as soon as an existing connection closes; the kernel holds it
+/// in the listen backlog meanwhile.
+const MAX_CONNECTIONS: usize = 16;
+
 /// Runs the accept loop until `stop` is set, spawning one worker thread per
 /// accepted connection.
 pub(super) fn run<F: ReadOnlyFs>(
@@ -28,9 +40,18 @@ pub(super) fn run<F: ReadOnlyFs>(
     stop: Arc<AtomicBool>,
 ) {
     let _ = listener.set_nonblocking(true);
-    let mut workers = Vec::new();
+    let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
     while !stop.load(Ordering::Relaxed) {
+        // Reap first, so a connection that has already closed frees its slot
+        // rather than counting against the cap until unmount.
+        workers.retain(|w| !w.is_finished());
+
+        if workers.len() >= MAX_CONNECTIONS {
+            std::thread::sleep(ACCEPT_POLL_INTERVAL);
+            continue;
+        }
+
         match listener.accept() {
             Ok((stream, _addr)) => {
                 let fs = Arc::clone(&fs);
@@ -114,3 +135,7 @@ fn handle_message<F: ReadOnlyFs>(body: &[u8], fs: &F, handle: &FileHandle3) -> O
         }
     }
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod server_tests;

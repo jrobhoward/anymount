@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # The advisory database changes without any commit here, so the security
+  # audit needs a clock as well as a push to trigger it.
+  schedule:
+    - cron: "17 6 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -46,7 +50,12 @@ jobs:
       # Every backend cfg'd out: the configuration `mount()` must still build
       # and report `FsError::Unsupported` in.
       - run: cargo clippy --all-targets --no-default-features -- -Dwarnings
+      # Scoped to this step rather than the workflow `env:` block, for the
+      # reason given at the top of this file: a broken intra-doc link should
+      # fail, a warning inside a dependency should not.
       - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
       # Reports which backends this runner can actually use. Informational: it
       # must not fail the build, since hosted runners cannot approve a macOS
@@ -117,6 +126,63 @@ jobs:
           wait
           ! mount | grep -qF /tmp/anymount-nfs-ci
 
+  # Windows is the third runner that completes a real mount. cfapi needs no
+  # admin step and no reboot, so this is unattended like the other two; without
+  # it the Windows backend would only ever be type checked.
+  cfapi-mount-smoke-test:
+    name: cfapi mount smoke test / windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Fail with an explanation rather than skipping: a silent skip here
+      # would leave the Windows backend claiming verification it never got.
+      - name: Confirm the Cloud Files platform is available
+        run: |
+          set -euo pipefail
+          cargo run -q --example probe | tee probe.txt
+          if grep -q "Cloud Files (cfapi): unavailable" probe.txt; then
+            echo "::error::CldApi reports no platform. This runner cannot host a" \
+                 "cfapi mount, so the Windows backend cannot be verified here."
+            exit 1
+          fi
+
+      - name: Mount memfs and verify contents
+        run: |
+          set -euo pipefail
+          # A Windows-shaped absolute path: cfapi registers a sync root, not a
+          # POSIX path, and the mountpoint must be an empty directory.
+          root="$(pwd -W)/mnt-cfapi-ci"
+          mkdir -p "$root"
+          cargo build --example memfs
+          ( sleep 40 ) | cargo run -q --example memfs -- "$root" &
+          sleep 10
+
+          # Enumerating the root is what triggers FETCH_PLACEHOLDERS.
+          ls -l "$root"
+          test "$(cat "$root/hello.txt")" = "Hello from anymount!"
+
+          # Compare a digest taken through the mount against one computed
+          # directly, so a truncated or misaligned TRANSFER_DATA is caught.
+          got=$(sha256sum "$root/numbers.txt" | cut -d' ' -f1)
+          want=$(seq 1 100 | sha256sum | cut -d' ' -f1)
+          test "$got" = "$want"
+
+          # On-demand population of a subdirectory: a second, separate
+          # FETCH_PLACEHOLDERS callback against a non-root inode.
+          test "$(cat "$root/subdir/nested.txt")" = "I am nested."
+          find "$root" | sort
+
+          wait
+          # Unmount must unregister the sync root and clear the placeholders
+          # it created, leaving the directory as it was found.
+          test -d "$root"
+          test -z "$(ls -A "$root")"
+
   cross-check:
     name: cross-compile check
     runs-on: ubuntu-latest
@@ -150,6 +216,9 @@ jobs:
       # toolchain. `dtolnay/rust-toolchain@stable` in the other jobs drifts
       # forward over time and would not catch this.
       - run: cargo check --all-targets
+      # Also run them: a test-only helper using an API newer than the floor
+      # compiles under `check` but is still a floor violation.
+      - run: cargo test
 
   licenses:
     name: licence policy
@@ -160,6 +229,30 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses bans sources
+
+  # Separate from the licence job so a new advisory is reported as its own
+  # failure rather than reading as a licence problem. `deny.toml` configures
+  # this check; without a job it never ran.
+  advisories:
+    name: security advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
+  # Catches a packaging problem — a missing file, an unpublishable path
+  # dependency — before a release tag rather than after one.
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y fuse3
+      - run: cargo publish --dry-run
 
   fmt:
     name: rustfmt

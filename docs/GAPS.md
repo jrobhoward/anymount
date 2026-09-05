@@ -38,9 +38,9 @@ record *plaintext* chunk lengths cannot seek: it must decode from byte 0. The
 recommended workaround is materialise-on-open — restore the whole file to a
 cache directory on `open`, then serve reads from it.
 
-This costs less than it sounds, because **cfapi has no ranged-read path at
-all: it fetches the entire file on first touch, unconditionally** — it
-materialises whole files anyway. Confirmed empirically (`docs/PLAN.md` Phase
+This costs less than it sounds, because cfapi has no ranged-read path at all:
+it fetches the entire file on first touch, unconditionally, so it materialises
+whole files anyway. Confirmed empirically (`docs/PLAN.md` Phase
 2, item 2): seeking straight to a 4 MiB offset in a never-touched placeholder
 and reading 4 KiB, without ever reading byte 0, still produced a single
 `CF_CALLBACK_TYPE_FETCH_DATA` call for the whole file — reproduced across
@@ -98,8 +98,8 @@ delay-loading), never link them statically.
 
 ## macOS: no FSKit backend — third-party FSKit modules do not load on this OS build
 
-**Moot for macOS as actually shipped: the decided macOS backend is NFS, not
-FUSE, so none of this section applies to normal use.** Kept in full below as
+Moot for macOS as actually shipped: the decided macOS backend is NFS, not
+FUSE, so none of this section applies to normal use. Kept in full below as
 background for why FUSE (and its FSKit alternatives) were set aside — and
 because `fuse`/macFUSE remains an available fallback if NFS ever turns out to
 have a blocking problem of its own. See `docs/PLAN.md`'s "Revised decision"
@@ -112,7 +112,7 @@ either through macFUSE's own FSKit backend, or a filesystem written directly
 against FSKit. Neither is usable today. This is a platform-level finding, not
 specific to `fuser` or to this crate.
 
-**`fuser` cannot reach macFUSE's FSKit backend.** `fuser` 0.18 (the FUSE
+`fuser` cannot reach macFUSE's FSKit backend. `fuser` 0.18 (the FUSE
 binding this crate uses) hardwires macOS mounting to `fuse_mount_compat25`, a
 legacy libfuse2-compatible C entry point (`fuser-0.18.0/build.rs`,
 unconditional on `target_os = "macos"`, never probes `fuse3`). Passing
@@ -132,8 +132,8 @@ signed binary inside the `.pkg`. So there is no way to reach the FSKit path by
 building macFUSE from source or by writing custom FFI against the public C
 API; the routing logic is closed-source either way.
 
-**Even macFUSE's official, signed FSKit module fails to authorize on this
-machine (macOS 26.6.2, build 25G83).** After installing macFUSE 5.3.3,
+Even macFUSE's official, signed FSKit module fails to authorize on this
+machine (macOS 26.6.2, build 25G83). After installing macFUSE 5.3.3,
 launching `macfuse.app` once to register its FSKit app extensions
 (`pluginkit -m` then lists `io.macfuse.app.fsmodule.macfuse` and `-local`),
 System Settings → General → Login Items & Extensions → Extensions → macFUSE →
@@ -180,7 +180,7 @@ Moot for the decided NFS backend either way — see the top of this section.
 
 ## macOS: approving macFUSE's kernel extension requires lowering boot security (Apple Silicon)
 
-**Only applies to the FUSE fallback, not the decided NFS backend** — the
+Only applies to the FUSE fallback, not the decided NFS backend — the
 README's macOS row lists no install burden for the default path precisely
 because NFS avoids all of this. Relevant only when deliberately using the
 `fuse`/macFUSE path instead.
@@ -191,10 +191,10 @@ under Login Items & Extensions, and nothing appears under Privacy & Security
 either, even after `kernelmanagerd`/`syspolicyd` have logged an explicit
 `Kernel Extension BLOCKED: ... not approved to load. Please approve using
 System Settings` in response to a real mount attempt. The approval surface
-only exists after the machine is rebooted into **Recovery Mode**, **Startup
-Security Utility** is opened, and the boot security policy is lowered from
-"Full Security" to **"Reduced Security"** with **"Allow user management of
-kernel extensions from identified developers"** checked. That is a standing
+only exists after the machine is rebooted into Recovery Mode, Startup Security
+Utility is opened, and the boot security policy is lowered from "Full Security"
+to "Reduced Security" with "Allow user management of kernel extensions from
+identified developers" checked. That is a standing
 change to the machine's boot-time security posture, not scoped to this crate
 or reversible with a single click — worth deciding deliberately rather than
 doing as a side effect of setting up a dev environment.
@@ -251,6 +251,18 @@ call/reply headers rather than using the `onc-rpc` crate
 — so a partial dependency saves little. `onc-rpc` remains the option if the
 hand-rolled envelope ever needs replacing.
 
+## NFS: at most 16 concurrent connections
+
+`backend/nfs/server.rs` serves at most `MAX_CONNECTIONS` connections at once,
+reaping finished workers each time round the accept loop. The listener binds to
+loopback and only this mount's own `mount_nfs` client has business connecting,
+so the cap exists to stop a local process opening sockets in a loop from
+costing one thread per connection until unmount. A legitimate client that hits
+the cap waits in the kernel's listen backlog until a slot frees.
+
+*To change:* raise the constant, or move to a thread pool with a work queue, if
+a client is ever found that needs more than a handful of connections.
+
 ## NFS: single-fragment RPC messages only
 
 `backend/nfs/rpc.rs`'s `read_message` closes the connection on a multi-fragment
@@ -272,12 +284,61 @@ is unmeasured, not verified safe.
 *To change:* use a constant-time comparison (e.g. `subtle::ConstantTimeEq`) if
 this ever needs a stronger guarantee than "loopback-only."
 
-## `allow_other` and `auto_unmount` are FUSE-only
+## Windows: the mountpoint must be empty, and unmounting clears it
 
-Both are FUSE mount options. The NFS backend has no counterpart — the server
-binds to loopback and authorizes with the file-handle secret rather than by uid
-— and neither does cfapi, where a sync root belongs to the user running the
-process. `backend/preflight.rs` rejects a request for either on a backend whose
+cfapi projects placeholders into the mountpoint rather than covering it the way
+a Unix mount does, so `mount()` requires an empty directory on Windows and
+rejects a non-empty one, naming the backend. Unmounting removes the entries the
+backend created, since nothing else reclaims them once the provider
+disconnects.
+
+The removal is narrow on purpose. Only entries still carrying
+`FILE_ATTRIBUTE_REPARSE_POINT` are deleted; anything else is left in place and
+logged. The precise cloud reparse tag is not checked, which would need
+`GetFileInformationByHandleEx(FileAttributeTagInfo)` and a handle opened with
+`FILE_FLAG_OPEN_REPARSE_POINT` — more FFI than the residual risk justifies once
+an empty mountpoint is already a precondition.
+
+The failure mode of being too cautious is a warning and a stray file, which
+then fails the emptiness check at the next mount. The failure mode of being too
+eager is deleting a file the backend did not create, so the check errs toward
+leaving things alone.
+
+*To change:* read the reparse tag and match it against the Cloud Files tags,
+if a case ever appears where a placeholder loses its reparse point.
+
+## `readdir` may page, and an empty page is the only end-of-directory signal
+
+`ReadOnlyFs::readdir` is allowed to return fewer than all the remaining
+entries; `backend/readdir.rs`'s `emit` calls it again at a higher offset until
+it returns an empty page. That means a short page cannot be used to mean "this
+is the end" — only an empty one can. An implementation that returned a partial
+page as its final answer would have the directory reported as complete at that
+point.
+
+The alternative — requiring every call to return the whole remaining tail —
+was what the crate assumed before 1.0. It made FUSE quadratic on large
+directories, since FUSE asks for a few kilobytes at a time and each call
+rebuilt the whole remainder, and it silently truncated any paging
+implementation on NFS and cfapi, where one listing pass is one reply.
+
+*To change:* nothing. Both shapes work; an implementation that always returns
+everything remaining is still correct, because its next call returns an empty
+page.
+
+## `allow_other`, `auto_unmount` and `threads` are FUSE-only
+
+`allow_other` and `auto_unmount` are FUSE mount options. The NFS backend has no
+counterpart — the server binds to loopback and authorizes with the file-handle
+secret rather than by uid — and neither does cfapi, where a sync root belongs to
+the user running the process.
+
+`MountBuilder::threads` is FUSE-only for a different reason: FUSE is the only
+backend that owns a worker pool. The NFS server sizes itself from the
+connections its client opens, and cfapi's callbacks are dispatched by the
+platform.
+
+`backend/preflight.rs` rejects a request for any of the three on a backend whose
 `Caps` does not claim it, naming the backend, rather than accepting the call and
 quietly doing nothing.
 

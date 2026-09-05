@@ -1050,6 +1050,75 @@ A `CaskFs` implementing `ReadOnlyFs`:
   at `tasks/add_remote/mod.rs:46`. This preserves the whole-file BLAKE3 check in
   `backend_helpers.rs:69` that a streaming reader would lose.
 
+### Phase 2.5 — 1.0 readiness
+
+**Done.** A full review before freezing the API found two defects in the
+Windows backend, one unwritten trait contract, and a set of decisions that had
+been left implicit. `CHANGELOG.md`'s 1.0.0 entry lists everything that landed;
+the decisions that shaped it are recorded here.
+
+- **cfapi's directory enumeration was a use-after-free.**
+  `list_placeholders` returned `CF_PLACEHOLDER_CREATE_INFO` values holding raw
+  pointers into a vector dropped on return, and `CfExecute` read through them.
+  The descriptors and their backing buffers now live in one `Placeholders`
+  value, reachable only through `with_descriptors`, which borrows the store
+  for the call. The type system cannot check a raw pointer's lifetime, so the
+  fix is a shape that keeps the borrow rather than a comment asserting the
+  pointers are still good.
+- **cfapi's unmount deleted the whole mountpoint.** A sync root projects into
+  a directory rather than covering it, so `remove_leftover_placeholders` was
+  clearing files it never created. Two bounds now apply: `preflight` requires
+  an empty mountpoint on cfapi (a new `Caps` field, so the policy stays in one
+  place), and only entries carrying `FILE_ATTRIBUTE_REPARSE_POINT` are
+  removed. Being too cautious costs a stray file and a warning; being too
+  eager costs a user their data.
+- **`readdir`'s contract was assumed, not written.** `emit` called it once and
+  treated the result as the whole remaining tail, so a paging implementation
+  had everything past its first page silently dropped. The damage was
+  backend-specific and worth being precise about: on NFS one `emit` call is
+  one `dirlist3`, so `eof` was set after the first page and the client stopped
+  there; on cfapi one call is the whole `TRANSFER_PLACEHOLDERS`, so the rest
+  of the directory never became placeholders. FUSE was fine by accident — its
+  kernel client reissues `readdir` from the last cookie regardless of what the
+  reply claimed — which is exactly why the Linux smoke test never caught it,
+  and why the regression tests are written at the `emit` and `nfs_proto`
+  layers rather than through a mount. The trait now says a partial page is
+  allowed and an empty page is the only end-of-directory signal, and `emit`
+  loops.
+- **The NFS wire layer moved off the macOS gate.** `xdr`, `rpc`, `handle`,
+  `mount_proto`, `nfs_proto` and `server` are byte manipulation and
+  `std::net`, so they now build and test on any Unix; only `mount` and
+  `NfsHandle` remain macOS-only. This follows `backend/readdir.rs`'s
+  precedent, and took the test count from 41 to 117 without adding a platform.
+- **Windows got runtime coverage.** cfapi was the only backend never executed
+  in CI, which is why both defects above survived. `cfapi-mount-smoke-test`
+  now mounts, enumerates, checksums and unmounts on a Windows runner, and
+  fails with an explanation rather than skipping if the platform is
+  unavailable.
+- **The value types are frozen without `#[non_exhaustive]`.** Marking
+  `FileKind`, `FileAttr`, `DirEntry` and `StatFs` non-exhaustive would reserve
+  room to grow them, at the cost of stopping implementors constructing them
+  with struct literals — which is how the trait is meant to be used. Weighed
+  and declined: the shapes cover what the crate needs, adding to them means a
+  major version, and that is not planned. `Backend` and `FsError` stay
+  non-exhaustive, where the cost is only a wildcard arm.
+- **`FsError::to_errno` became available on every platform.** It was `pub`
+  under `cfg(unix)`, so downstream code calling it failed to compile on
+  Windows. `errno` is a usable portable taxonomy even where nothing consumes
+  it as one.
+
+Deliberately not done, and why:
+
+- **No constant-time comparison for the NFS handle secret.** Still catalogued
+  in `docs/GAPS.md`. The mount binds to loopback, and the posture is
+  documented as unmeasured rather than claimed safe.
+- **No per-inode handle cache** on either NFS or cfapi. Both remain in
+  `docs/GAPS.md` as costs to pay when a workload shows them mattering.
+- **No reparse-tag check** in cfapi's cleanup. Reading the tag needs
+  `GetFileInformationByHandleEx` and a handle opened with
+  `FILE_FLAG_OPEN_REPARSE_POINT`; the empty-mountpoint precondition already
+  bounds the risk.
+
 ## Feature flags
 
 | Feature | Default | Effect |
