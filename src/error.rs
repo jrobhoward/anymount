@@ -78,6 +78,32 @@ impl FsError {
         }
     }
 
+    /// Raw `NTSTATUS` value for this error, used by the cfapi backend to fail a
+    /// `TRANSFER_DATA`/`TRANSFER_PLACEHOLDERS` operation. Returned as a plain
+    /// `i32` rather than `windows::Win32::Foundation::NTSTATUS` so this module
+    /// does not need the `windows` crate in scope; the cfapi backend wraps it
+    /// at the call site.
+    #[cfg(all(windows, feature = "cfapi"))]
+    pub(crate) fn to_ntstatus(&self) -> i32 {
+        use windows::Win32::Foundation::{
+            STATUS_ACCESS_DENIED, STATUS_CLOUD_FILE_UNSUCCESSFUL, STATUS_INVALID_PARAMETER,
+            STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_NOT_FOUND,
+        };
+
+        match self {
+            Self::NotFound => STATUS_OBJECT_NAME_NOT_FOUND.0,
+            Self::PermissionDenied => STATUS_ACCESS_DENIED.0,
+            Self::InvalidArgument => STATUS_INVALID_PARAMETER.0,
+            Self::Unsupported(_) | Self::NoXattr => STATUS_NOT_SUPPORTED.0,
+            Self::NotADirectory
+            | Self::IsADirectory
+            | Self::ReadOnly
+            | Self::Io(_)
+            | Self::Other(_) => STATUS_CLOUD_FILE_UNSUCCESSFUL.0,
+            Self::Context { errno_as, .. } => errno_as.to_ntstatus(),
+        }
+    }
+
     /// POSIX `errno` for this error, used by the FUSE backend.
     #[cfg(unix)]
     pub fn to_errno(&self) -> i32 {
@@ -97,6 +123,24 @@ impl FsError {
             Self::Io(e) => e.raw_os_error().unwrap_or(libc::EIO),
             Self::Other(_) => libc::EIO,
             Self::Context { errno_as, .. } => errno_as.to_errno(),
+        }
+    }
+}
+
+/// Wrap a Win32/COM failure from the cfapi backend, preserving its message.
+///
+/// `windows::core::Error` carries an `HRESULT` and a human-readable message;
+/// only `E_ACCESSDENIED` is common enough during mount setup (registering a
+/// sync root without sufficient rights on the directory) to warrant its own
+/// variant. Everything else becomes [`FsError::Other`] with the message
+/// intact rather than losing it behind a generic errno.
+#[cfg(all(windows, feature = "cfapi"))]
+impl From<windows::core::Error> for FsError {
+    fn from(e: windows::core::Error) -> Self {
+        if e.code() == windows::Win32::Foundation::E_ACCESSDENIED {
+            Self::PermissionDenied
+        } else {
+            Self::Other(e.message())
         }
     }
 }

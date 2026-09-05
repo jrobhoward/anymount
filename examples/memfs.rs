@@ -17,6 +17,10 @@
 //!
 //! Then, from another shell, verify with real tools rather than trusting the
 //! process output: `ls -lR`, `cat`, `find`, and `sha256sum`.
+//!
+//! Pass `--open` to also pop a file-manager window at the mount root, via the
+//! `opener` crate (a dev-dependency; nothing in the library itself does this —
+//! see README.md's "Opening the mount in a file manager").
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
@@ -173,10 +177,12 @@ impl ReadOnlyFs for MemFs {
 }
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let mountpoint = std::env::args().nth(1).ok_or(
-        "usage: memfs <mountpoint>\n\
+    let mut args = std::env::args().skip(1);
+    let mountpoint = args.next().ok_or(
+        "usage: memfs <mountpoint> [--open]\n\
          hint: mkdir -p /tmp/anymount-demo && cargo run --example memfs -- /tmp/anymount-demo",
     )?;
+    let open = args.any(|a| a == "--open");
 
     let mount = MountBuilder::new(&mountpoint)
         .fs_name("anymount-memfs")
@@ -186,6 +192,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("try:  ls -lR {mountpoint}");
     println!("      cat {mountpoint}/hello.txt");
     println!("      sha256sum {mountpoint}/numbers.txt");
+
+    if open {
+        // `anymount` only ever mounts at the path the caller gave it — there
+        // is no OS-injected relocation to account for — so the mountpoint
+        // returned here is exactly what a file manager needs to point at.
+        // Opening it is the caller's job, not the library's; `opener` is a
+        // dev-dependency of this example alone.
+        if let Err(e) = opener::open(mount.mountpoint()) {
+            eprintln!("could not open a file manager window: {e}");
+        }
+    }
+
     println!("\npress Enter to unmount...");
 
     let mut line = String::new();

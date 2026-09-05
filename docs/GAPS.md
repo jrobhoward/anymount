@@ -230,6 +230,17 @@ idle-evicting handle cache keyed by `Ino` would remove that cost.
 staleness. Worth doing only once a real workload shows the round trip
 mattering; `ciphercask` (Phase 3) does not need it yet.
 
+## cfapi: no per-inode handle cache — `FETCH_DATA` pays an open/release round trip
+
+`backend/cfapi.rs`'s `stream_fetch` calls `fs.open`/`read_at`/`release` once per
+`FETCH_DATA` callback rather than caching a handle per `Ino`. Since cfapi always
+fetches a whole file in one callback (see this file's "Read pattern" docs),
+this costs one open/release pair per file rather than per read the way the NFS
+gap above does — a smaller version of the same tradeoff.
+
+*To change:* same shape as the NFS gap above, if a real workload shows it
+mattering.
+
 ## NFS: hand-rolled RPC framing, not the `onc-rpc` crate
 
 `backend/nfs/rpc.rs` hand-rolls ONC RPC (RFC 5531) record marking and

@@ -890,11 +890,10 @@ What this leaves for Phase 2: the cfapi backend supplies a `mount` function, a
 
 ### Phase 2 — Windows backend
 
-**Current state:** `src/backend/cfapi.rs`'s `mount()` is a hard stub — it
-checks `probe()` and returns `FsError::Unsupported`, nothing else. Registration
-was confirmed working in Phase 0. All four items below are now spiked and
-answered with real evidence, the same way NFS's open questions were closed
-before committing to `backend/nfs.rs`'s design.
+**Done.** All four items below were spiked and answered with real evidence,
+the same way NFS's open questions were closed before committing to
+`backend/nfs.rs`'s design; `backend/cfapi.rs` is now built for real against
+those answers, not a stub.
 
 1. **Fetch-callback correctness — spiked, and it works.** A throwaway spike
    (built, run, then deleted — not part of the crate, same convention as every
@@ -985,18 +984,54 @@ before committing to `backend/nfs.rs`'s design.
    after a crash is a clean re-register, not a stale-state cleanup problem.**
    This closes Phase 2's spike list; all four items now have real answers.
 
-All four have real answers, and Phase 1.5 has since removed most of the
-non-cfapi work this phase would otherwise carry: `CfApiHandle` implements
-`backend::Mounted` (teardown, and unmount-on-drop, come from `Mount`), a
-`Caps` covers option validation and the mountpoint check, and directory
-enumeration reuses `backend::readdir::emit` with `Dots::Omit`. What remains is
-cfapi-specific: build `CfApiHandle`/`mount()` for real against the
-`windows` crate directly — `PopulationType::Partial` for on-demand
-enumeration, `STREAMING_ALLOWED` to avoid persisting fetched data,
-`AUTO_DEHYDRATION_ALLOWED` for reclamation — and verify with the same bar
-every other backend has met: `dir`/`ls`, `type`/`cat`, a checksum through the
-mount matching one computed independently, and confirmation that
-`CfUnregisterSyncRoot` leaves no orphaned sync root behind.
+All four had real answers going in, and Phase 1.5 had already removed most of
+the non-cfapi work this phase would otherwise have carried: `CfApiHandle<F>`
+implements `backend::Mounted` (teardown, and unmount-on-drop, come from
+`Mount`), a `Caps` covers option validation and the mountpoint check, and
+directory enumeration reuses `backend::readdir::emit` with `Dots::Omit`. What
+was left was cfapi-specific: `CfRegisterSyncRoot` with
+`CF_POPULATION_POLICY_PARTIAL` for on-demand enumeration,
+`CF_HYDRATION_POLICY_MODIFIER_STREAMING_ALLOWED` to avoid persisting fetched
+data, and `CF_HYDRATION_POLICY_MODIFIER_AUTO_DEHYDRATION_ALLOWED` for
+reclamation; `CfConnectSyncRoot` with a callback table answering
+`CF_CALLBACK_TYPE_FETCH_DATA` and `CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS`; and
+`CfExecute` with `CF_OPERATION_TYPE_TRANSFER_DATA` /
+`CF_OPERATION_TYPE_TRANSFER_PLACEHOLDERS` to answer them.
+
+**One more finding surfaced only once this was built for real, not in any
+earlier spike: the mountpoint itself needs no `CfConvertToPlaceholder` call at
+all.** The natural assumption — that an ordinary directory needs to be
+explicitly converted to a placeholder with
+`CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION` before it will ever receive a
+`FETCH_PLACEHOLDERS` callback, the way a subdirectory created through
+`CF_OPERATION_TYPE_TRANSFER_PLACEHOLDERS` does — turned out to be wrong and
+actively rejected: calling `CfConvertToPlaceholder` on the just-registered,
+just-connected sync root directory failed every time with
+`ERROR_CLOUD_FILE_INVALID_REQUEST` (`0x8007017C`), confirmed by reading the
+raw `HRESULT` back rather than trusting the generic "The cloud operation is
+invalid" message text. Removing that call entirely and just registering +
+connecting was enough on its own — `dir` against the freshly mounted, never-
+touched root correctly triggered `FETCH_PLACEHOLDERS` and listed real
+children, with no conversion step anywhere. `CF_POPULATION_POLICY_PARTIAL` set
+at `CfRegisterSyncRoot` time governs the whole tree including the root, and
+`CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION` is only for a directory created
+*after* the sync root already exists. The one follow-on consequence: the
+root's `FETCH_PLACEHOLDERS` callback carries an empty `FileIdentity` (nothing
+ever set one on it, unlike every directory this backend creates itself via
+`to_create_info`), so `handle_fetch_placeholders` treats a zero-length
+identity as `ROOT_INO` rather than treating it as a decode failure.
+
+Verified end to end on this machine, real tools throughout, the same bar every
+other backend has met: `cargo run --example memfs` (and a throwaway smoke
+driver with a 3 MiB+777-byte file, built, run, then deleted like every other
+spike here) mounted unprivileged, `mount.backend()` reported `CfApi`, `dir`
+listed the root and a populated subdirectory correctly, `type` returned
+correct file content, `certutil -hashfile ... SHA256` on the large file
+matched a digest computed independently (exercising several
+`CF_OPERATION_TYPE_TRANSFER_DATA` chunks, not just a single-shot transfer),
+and `mount.unmount()` left the mountpoint an empty, ordinary directory with no
+orphaned sync root — confirmed by mounting the same path again immediately
+afterward and having it succeed cleanly.
 
 ProjFS is not part of this crate — see the Windows spike result above for why
 it was cut rather than kept as a fallback.

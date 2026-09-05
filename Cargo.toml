@@ -34,6 +34,11 @@ thiserror = "2"
 tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
+# examples/memfs.rs uses this to open the mount in the OS's file manager after
+# mounting — a convenience deliberately left to the caller (see README.md's
+# "Opening the mount in a file manager"), not something `anymount` itself
+# does. Dev-only: nothing in the library depends on it.
+opener = "0.8"
 proptest = "1"
 # Mountpoint-validation tests need a real directory and a real file. Already in
 # the graph as a `proptest` dependency, so naming it here adds no new crate.
@@ -57,7 +62,9 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
     "Win32_Storage_CloudFilters",
     "Win32_Storage_FileSystem",
+    "Win32_System_CorrelationVector",
     "Win32_System_IO",
+    "Win32_Security",
 ] }
 
 [lints.clippy]
