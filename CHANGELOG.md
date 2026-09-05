@@ -23,6 +23,10 @@ for why none of the value types are `#[non_exhaustive]`.
   destroyed them. The mountpoint must now be empty at mount time, and only
   entries still carrying `FILE_ATTRIBUTE_REPARSE_POINT` are removed on
   unmount; anything else is left in place and logged.
+- cfapi: unmount left every placeholder file behind, though a placeholder
+  directory was removed correctly. Every placeholder file is created
+  `FILE_ATTRIBUTE_READONLY`, and Windows refuses to delete a read-only file;
+  the read-only attribute is now cleared before removal.
 - NFS and cfapi: a `ReadOnlyFs::readdir` that returned a partial page had
   every entry past that page silently dropped. One `emit` call is one
   `dirlist3` or one `TRANSFER_PLACEHOLDERS`, so a short page was reported as a

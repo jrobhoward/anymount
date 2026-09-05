@@ -229,6 +229,21 @@ fn remove_leftover_placeholders(mountpoint: &Path) {
         let result = if is_dir {
             std::fs::remove_dir_all(&path)
         } else {
+            // Every placeholder file this backend creates is
+            // `FILE_ATTRIBUTE_READONLY` (`to_create_info`), and `DeleteFile`
+            // refuses a read-only file — clear it first or the removal below
+            // fails with access denied and the entry is left behind.
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let mut perms = meta.permissions();
+                if perms.readonly() {
+                    // This file is Windows-only: `Permissions` here encodes
+                    // only the read-only attribute, not Unix mode bits, so
+                    // there is no world-writable footgun to worry about.
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    perms.set_readonly(false);
+                    let _ = std::fs::set_permissions(&path, perms);
+                }
+            }
             std::fs::remove_file(&path)
         };
         if let Err(e) = result {
