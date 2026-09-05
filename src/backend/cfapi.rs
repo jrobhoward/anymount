@@ -207,7 +207,23 @@ fn remove_leftover_placeholders(mountpoint: &Path) {
 
         match entry.metadata() {
             Ok(meta) if is_reparse_point(&meta) => {}
-            Ok(_) => {
+            Ok(meta) => {
+                // TEMPORARY: unconditional (not tracing-gated) diagnostic
+                // for a live CI investigation into leftover placeholder
+                // files after unmount — two prior fixes (attribute-based
+                // gating as designed, then clearing FILE_ATTRIBUTE_READONLY
+                // before delete) had no observed effect, so this prints the
+                // raw attributes to confirm or rule out the theory that the
+                // entry has already lost FILE_ATTRIBUTE_REPARSE_POINT by the
+                // time this runs, which would skip it right here before any
+                // removal is attempted. Remove once the real cause is
+                // confirmed.
+                use std::os::windows::fs::MetadataExt;
+                eprintln!(
+                    "anymount/cfapi[debug]: {} attributes=0x{:x} — not a reparse point, skipping",
+                    path.display(),
+                    meta.file_attributes()
+                );
                 backend_warn!(
                     "anymount/cfapi: leaving {} in place after unmount: it is not a \
                      placeholder, so this backend did not create it",
@@ -241,11 +257,26 @@ fn remove_leftover_placeholders(mountpoint: &Path) {
                     // there is no world-writable footgun to worry about.
                     #[allow(clippy::permissions_set_readonly_false)]
                     perms.set_readonly(false);
-                    let _ = std::fs::set_permissions(&path, perms);
+                    // TEMPORARY: see the diagnostic note above.
+                    if let Err(e) = std::fs::set_permissions(&path, perms) {
+                        eprintln!(
+                            "anymount/cfapi[debug]: clearing read-only on {} failed: {e}",
+                            path.display()
+                        );
+                    }
                 }
             }
             std::fs::remove_file(&path)
         };
+        match &result {
+            // TEMPORARY: see the diagnostic note above.
+            Ok(()) => eprintln!("anymount/cfapi[debug]: removed {}", path.display()),
+            Err(e) => eprintln!(
+                "anymount/cfapi[debug]: removing {} failed: {e} (kind: {:?})",
+                path.display(),
+                e.kind()
+            ),
+        }
         if let Err(e) = result {
             backend_warn!(
                 "anymount/cfapi: removing leftover placeholder {}: {e}",
