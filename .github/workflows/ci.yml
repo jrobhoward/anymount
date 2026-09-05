@@ -179,9 +179,19 @@ jobs:
 
           wait
           # Unmount must unregister the sync root and clear the placeholders
-          # it created, leaving the directory as it was found.
-          test -d "$root"
-          test -z "$(ls -A "$root")"
+          # it created, leaving the directory as it was found. Checked with
+          # explicit diagnostics rather than a bare `test`, so a failure here
+          # shows exactly what was left behind instead of a bare exit code.
+          if [ ! -d "$root" ]; then
+            echo "::error::mountpoint $root no longer exists after unmount"
+            exit 1
+          fi
+          leftover="$(ls -A "$root")"
+          if [ -n "$leftover" ]; then
+            echo "::error::leftover entries in $root after unmount"
+            ls -la "$root"
+            exit 1
+          fi
 
   cross-check:
     name: cross-compile check

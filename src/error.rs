@@ -165,13 +165,11 @@ impl FsError {
     ///
     /// The values are Linux's, spelled out because no `libc` is linked here.
     /// They are a stable taxonomy for a caller that wants to classify an error
-    /// portably, not something to hand to a Windows API — [`to_ntstatus`] is
-    /// what the cfapi backend uses. `Io` reports its own raw OS error where it
-    /// has one, which on Windows is a Win32 code rather than an `errno`, so a
-    /// caller matching on specific numbers should treat that variant as the
-    /// exception.
-    ///
-    /// [`to_ntstatus`]: Self::to_ntstatus
+    /// portably, not something to hand to a Windows API — the cfapi backend
+    /// maps to `NTSTATUS` internally instead. `Io` reports its own raw OS
+    /// error where it has one, which on Windows is a Win32 code rather than
+    /// an `errno`, so a caller matching on specific numbers should treat that
+    /// variant as the exception.
     #[cfg(not(unix))]
     pub fn to_errno(&self) -> i32 {
         // Linux's <asm-generic/errno.h> values.
