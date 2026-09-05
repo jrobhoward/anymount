@@ -190,6 +190,17 @@ jobs:
           if [ -n "$leftover" ]; then
             echo "::error::leftover entries in $root after unmount"
             ls -la "$root"
+            # A prior fix (clearing FILE_ATTRIBUTE_READONLY before deleting)
+            # did not resolve this, so get the real Windows-side reason
+            # rather than guess again: full attributes, then a forced delete
+            # attempt that surfaces the actual exception. Single-quoted so
+            # bash never touches `$_`/`$()`/`$env:` meant for PowerShell; the
+            # path crosses over through an environment variable instead.
+            export MNT_ROOT="$root"
+            powershell -NoProfile -Command \
+              'Get-ChildItem -Force -LiteralPath $env:MNT_ROOT | Format-List FullName,Attributes,LastWriteTime'
+            powershell -NoProfile -Command \
+              'Get-ChildItem -Force -LiteralPath $env:MNT_ROOT -File | ForEach-Object { try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop; Write-Host "deleted: $($_.FullName)" } catch { Write-Host "FAILED: $($_.FullName): $_" } }'
             exit 1
           fi
 
