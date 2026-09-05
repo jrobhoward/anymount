@@ -87,8 +87,9 @@ One line each; see the named module's rustdoc or `docs/GAPS.md` for detail.
 
 - `allow_other`, `auto_unmount`, and `threads` are FUSE-only builder options;
   `preflight` rejects them elsewhere by name rather than ignoring them.
-- cfapi requires an empty mountpoint and only deletes entries it created
-  (`FILE_ATTRIBUTE_REPARSE_POINT`) on unmount.
+- cfapi requires an empty mountpoint at mount time; that precondition, not
+  any attribute on the entries, is what makes it safe to delete everything
+  found there on unmount.
 - cfapi's placeholder descriptors (`CF_PLACEHOLDER_CREATE_INFO`) are raw
   pointers with no lifetime; `Placeholders::with_descriptors` keeps their
   backing store alive for exactly the `CfExecute` call that reads them.

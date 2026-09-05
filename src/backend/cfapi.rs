@@ -67,8 +67,7 @@ use windows::Win32::Storage::CloudFilters::{
     CfRegisterSyncRoot, CfUnregisterSyncRoot,
 };
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_BASIC_INFO,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO,
 };
 use windows::core::{GUID, HRESULT, PCWSTR};
 
@@ -165,31 +164,31 @@ impl<F: ReadOnlyFs> Mounted for CfApiHandle<F> {
     }
 }
 
-/// Best-effort cleanup after `CfUnregisterSyncRoot`: placeholder entries this
-/// backend created remain on disk as reparse-point stubs once the provider
-/// disconnects, and nothing else will ever reclaim them. Removing them here is
-/// what lets [`unmount`](Mounted::unmount) honor [`Mounted`]'s "leaves nothing
-/// behind" contract. Failures are logged, not propagated, matching every other
+/// Best-effort cleanup after `CfUnregisterSyncRoot`: entries this backend
+/// created remain on disk once the provider disconnects, and nothing else
+/// will ever reclaim them. Removing them here is what lets
+/// [`unmount`](Mounted::unmount) honor [`Mounted`]'s "leaves nothing behind"
+/// contract. Failures are logged, not propagated, matching every other
 /// best-effort cleanup in this crate (a failed `release`, a failed unmount
 /// during `drop`).
 ///
-/// # Why this is narrow
+/// # Why this removes everything found here, not just reparse points
 ///
-/// This function deletes files, so it deletes as little as it can. Two things
-/// bound it. The mountpoint was required to be empty at mount time
-/// ([`CAPS`]), so anything found here should be this backend's own work; and
-/// each entry must still carry `FILE_ATTRIBUTE_REPARSE_POINT`, which a
-/// placeholder does and an ordinary file does not. An entry failing that test
-/// is left alone and logged rather than removed — leaving a stray file behind
-/// costs a warning and a failed emptiness check at the next mount, while
-/// deleting the wrong one costs a user their data. Given that trade, being
-/// too cautious is the correct way to be wrong.
+/// An earlier version of this function only removed entries still carrying
+/// `FILE_ATTRIBUTE_REPARSE_POINT`, on the assumption that every placeholder
+/// keeps that attribute until removed. That assumption is false: a
+/// placeholder file that was fully hydrated before unmount can lose
+/// `FILE_ATTRIBUTE_REPARSE_POINT` once the sync root disconnects — confirmed
+/// against a real mount, where a fully-read file was left behind
+/// indefinitely because the attribute check itself skipped it before any
+/// removal was attempted.
 ///
-/// The precise cloud reparse tag is not checked. Reading it needs
-/// `GetFileInformationByHandleEx(FileAttributeTagInfo)` and a handle opened
-/// with `FILE_FLAG_OPEN_REPARSE_POINT` — more FFI and more unsafe than the
-/// remaining risk justifies, given an empty mountpoint is already a
-/// precondition.
+/// The actual safety guarantee was never that attribute — it is
+/// [`CAPS`]'s `empty_mountpoint`: the directory had nothing in it when this
+/// backend registered the sync root, and nothing else has legitimate reason
+/// to write into an active sync root's directory during the mount. So
+/// everything found here at unmount is this backend's own, regardless of
+/// what attributes survived hydration and disconnect.
 fn remove_leftover_placeholders(mountpoint: &Path) {
     let entries = match std::fs::read_dir(mountpoint) {
         Ok(entries) => entries,
@@ -204,47 +203,9 @@ fn remove_leftover_placeholders(mountpoint: &Path) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-
-        match entry.metadata() {
-            Ok(meta) if is_reparse_point(&meta) => {}
-            Ok(meta) => {
-                // TEMPORARY: unconditional (not tracing-gated) diagnostic
-                // for a live CI investigation into leftover placeholder
-                // files after unmount — two prior fixes (attribute-based
-                // gating as designed, then clearing FILE_ATTRIBUTE_READONLY
-                // before delete) had no observed effect, so this prints the
-                // raw attributes to confirm or rule out the theory that the
-                // entry has already lost FILE_ATTRIBUTE_REPARSE_POINT by the
-                // time this runs, which would skip it right here before any
-                // removal is attempted. Remove once the real cause is
-                // confirmed.
-                use std::os::windows::fs::MetadataExt;
-                eprintln!(
-                    "anymount/cfapi[debug]: {} attributes=0x{:x} — not a reparse point, skipping",
-                    path.display(),
-                    meta.file_attributes()
-                );
-                backend_warn!(
-                    "anymount/cfapi: leaving {} in place after unmount: it is not a \
-                     placeholder, so this backend did not create it",
-                    path.display()
-                );
-                continue;
-            }
-            Err(e) => {
-                backend_warn!(
-                    "anymount/cfapi: leaving {} in place after unmount: its attributes \
-                     could not be read, so it cannot be confirmed as a placeholder: {e}",
-                    path.display()
-                );
-                continue;
-            }
-        }
-
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let result = if is_dir {
-            std::fs::remove_dir_all(&path)
-        } else {
+
+        if !is_dir {
             // Every placeholder file this backend creates is
             // `FILE_ATTRIBUTE_READONLY` (`to_create_info`), and `DeleteFile`
             // refuses a read-only file — clear it first or the removal below
@@ -257,26 +218,16 @@ fn remove_leftover_placeholders(mountpoint: &Path) {
                     // there is no world-writable footgun to worry about.
                     #[allow(clippy::permissions_set_readonly_false)]
                     perms.set_readonly(false);
-                    // TEMPORARY: see the diagnostic note above.
-                    if let Err(e) = std::fs::set_permissions(&path, perms) {
-                        eprintln!(
-                            "anymount/cfapi[debug]: clearing read-only on {} failed: {e}",
-                            path.display()
-                        );
-                    }
+                    let _ = std::fs::set_permissions(&path, perms);
                 }
             }
+        }
+
+        let result = if is_dir {
+            std::fs::remove_dir_all(&path)
+        } else {
             std::fs::remove_file(&path)
         };
-        match &result {
-            // TEMPORARY: see the diagnostic note above.
-            Ok(()) => eprintln!("anymount/cfapi[debug]: removed {}", path.display()),
-            Err(e) => eprintln!(
-                "anymount/cfapi[debug]: removing {} failed: {e} (kind: {:?})",
-                path.display(),
-                e.kind()
-            ),
-        }
         if let Err(e) = result {
             backend_warn!(
                 "anymount/cfapi: removing leftover placeholder {}: {e}",
@@ -284,16 +235,6 @@ fn remove_leftover_placeholders(mountpoint: &Path) {
             );
         }
     }
-}
-
-/// Does this entry carry `FILE_ATTRIBUTE_REPARSE_POINT`?
-///
-/// Every placeholder cfapi creates does; an ordinary file does not. Split out
-/// from [`remove_leftover_placeholders`] so the predicate is unit testable
-/// against a `Metadata` obtained from a real file.
-fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
 }
 
 /// Platform version reported by `CfGetPlatformInfo`, proving `CldApi.dll` loads.

@@ -198,24 +198,20 @@ this ever needs a stronger guarantee than "loopback-only."
 
 cfapi projects placeholders into the mountpoint rather than covering it the way
 a Unix mount does, so `mount()` requires an empty directory on Windows and
-rejects a non-empty one, naming the backend. Unmounting removes the entries the
-backend created, since nothing else reclaims them once the provider
-disconnects.
+rejects a non-empty one, naming the backend. Unmounting removes everything
+found in the mountpoint, since nothing else reclaims it once the provider
+disconnects, and nothing else has legitimate reason to have written there
+during the mount.
 
-The removal is narrow on purpose. Only entries still carrying
-`FILE_ATTRIBUTE_REPARSE_POINT` are deleted; anything else is left in place and
-logged. The precise cloud reparse tag is not checked, which would need
-`GetFileInformationByHandleEx(FileAttributeTagInfo)` and a handle opened with
-`FILE_FLAG_OPEN_REPARSE_POINT` — more FFI than the residual risk justifies once
-an empty mountpoint is already a precondition.
+An earlier version of this check tried to be narrower: delete only entries
+still carrying `FILE_ATTRIBUTE_REPARSE_POINT`, leaving anything else in place
+and logged. That assumed a placeholder always keeps that attribute, which is
+false — a fully-hydrated placeholder file can lose it once the sync root
+disconnects, and the attribute-based check then left it behind indefinitely.
+The empty-mountpoint precondition at mount time was always the actual
+safety guarantee, so removal no longer depends on the attribute surviving.
 
-The failure mode of being too cautious is a warning and a stray file, which
-then fails the emptiness check at the next mount. The failure mode of being too
-eager is deleting a file the backend did not create, so the check errs toward
-leaving things alone.
-
-*To change:* read the reparse tag and match it against the Cloud Files tags,
-if a case ever appears where a placeholder loses its reparse point.
+*To change:* nothing outstanding here.
 
 ## `readdir` may page, and an empty page is the only end-of-directory signal
 

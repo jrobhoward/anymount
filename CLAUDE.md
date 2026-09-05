@@ -95,9 +95,13 @@ adds a `Caps`, not a fourth policy.
 **cfapi requires an empty mountpoint, and clears it on unmount.** A sync root
 projects placeholders *into* the directory rather than covering it, so
 mounting over existing files would destroy them. `Caps::empty_mountpoint`
-enforces the precondition; `remove_leftover_placeholders` deletes only
-entries still carrying `FILE_ATTRIBUTE_REPARSE_POINT`. Do not widen that
-check to "delete everything found here" — that was a pre-1.0 data-loss bug.
+enforces the precondition, and that precondition — not any attribute on the
+entries themselves — is what makes `remove_leftover_placeholders` safe to
+delete everything it finds at unmount. An earlier version tried to be
+narrower by only deleting entries still carrying
+`FILE_ATTRIBUTE_REPARSE_POINT`; that broke silently for a fully-hydrated
+placeholder file, which can lose that attribute before unmount. Do not
+reintroduce an attribute-based gate here without solving that.
 
 **cfapi's placeholder descriptors must outlive the `CfExecute` call that reads
 them.** `CF_PLACEHOLDER_CREATE_INFO` holds raw pointers with no lifetime, so
