@@ -131,7 +131,8 @@ fn read_call_header____a_well_formed_call____is_parsed_with_the_cursor_at_the_ar
 fn read_call_header____auth_sys_credentials____are_skipped_not_trusted() {
     // A real `mount_nfs` sends AUTH_SYS with a claimed uid/gid. The parser
     // must step over the body to reach the arguments; the contents are
-    // deliberately never read (see `docs/PLAN.md`, Phase 0.6).
+    // deliberately never read — see `docs/ARCHITECTURE.md`'s platform
+    // constraints for why AUTH_SYS is not trusted.
     let mut w = Writer::new();
     w.write_u32(1);
     w.write_u32(0); // CALL

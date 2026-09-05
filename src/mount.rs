@@ -71,7 +71,7 @@ impl MountBuilder {
     /// Let users other than the mounter see the mount (FUSE `allow_other`).
     ///
     /// Requires `user_allow_other` in `/etc/fuse.conf`. Off by default because
-    /// a backup mount is normally private to one user.
+    /// a mount is normally private to one user.
     ///
     /// FUSE only. The NFS and cfapi backends have no equivalent and reject the
     /// request at [`mount`](Self::mount) time rather than ignoring it.

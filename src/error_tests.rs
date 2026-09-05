@@ -90,11 +90,11 @@ fn io_error____from_each_plain_variant____maps_to_a_matching_kind() {
 
 #[test]
 fn io_error____from_a_context_wrapped_error____keeps_the_outer_message_and_inner_kind() {
-    let err = FsError::NotFound.context("no such backup in the archive");
+    let err = FsError::NotFound.context("no such entry in the archive");
     let converted: std::io::Error = err.into();
     assert_eq!(converted.kind(), std::io::ErrorKind::NotFound);
     assert!(
-        converted.to_string().contains("no such backup"),
+        converted.to_string().contains("no such entry"),
         "{converted}"
     );
 }

@@ -5,8 +5,8 @@ Kept honest so downstream users hit no surprises.
 
 ## Read-only
 
-Write operations report `EROFS`. The first consumer restores from immutable
-backup snapshots, so nothing in v1 needs writes. [ProjFS cannot intercept
+Write operations report `EROFS`. The first consumer serves immutable,
+already-captured content, so nothing in v1 needs writes. [ProjFS cannot intercept
 writes at all](https://github.com/microsoft/ProjFS-Managed-API/issues/30) —
 one of the reasons it was cut rather than kept as a fallback (see below) — so
 a cross-platform write story would have been uneven from the start anyway.
@@ -17,19 +17,19 @@ realistically means WinFsp, which reintroduces GPLv3 — see below.
 
 ## No symlinks or hardlinks
 
-`FileKind` has only `File` and `Directory`. ciphercask skips symlinks at
-backup time, and cfapi does not model them the way FUSE does.
+`FileKind` has only `File` and `Directory`. The first consumer skips symlinks
+when capturing content, and cfapi does not model them the way FUSE does.
 
 *To change:* add `FileKind::Symlink` plus a `readlink` op.
 
 ## Directory metadata is synthesised
 
-Backup archives generally store files, not directories, so the tree is rebuilt
-from path strings. Synthesised directories get default permissions and no
-meaningful timestamps.
+An archive format generally stores files, not directories, so the tree is
+rebuilt from path strings. Synthesised directories get default permissions
+and no meaningful timestamps.
 
 *To change:* nothing here — this belongs to the implementor, which knows what
-its archive recorded.
+its source recorded.
 
 ## No random-access streaming from chunked archives
 
@@ -39,14 +39,9 @@ recommended workaround is materialise-on-open — restore the whole file to a
 cache directory on `open`, then serve reads from it.
 
 This costs less than it sounds, because cfapi has no ranged-read path at all:
-it fetches the entire file on first touch, unconditionally, so it materialises
-whole files anyway. Confirmed empirically (`docs/PLAN.md` Phase
-2, item 2): seeking straight to a 4 MiB offset in a never-touched placeholder
-and reading 4 KiB, without ever reading byte 0, still produced a single
-`CF_CALLBACK_TYPE_FETCH_DATA` call for the whole file — reproduced across
-`CF_HYDRATION_POLICY_PARTIAL`, `CF_HYDRATION_POLICY_PROGRESSIVE`, and
-unbuffered sector-aligned I/O, so neither hydration policy nor the NTFS cache
-manager's own read-ahead explains it. Only the FUSE path issues random reads.
+it fetches the entire file on first touch, unconditionally, regardless of
+hydration policy, so it materialises whole files anyway. Only the FUSE path
+issues random reads.
 
 *To change:* the archive format must record plaintext chunk offsets. The trait
 does not change when it does.
@@ -65,8 +60,8 @@ opt-in `anymount-winfsp` crate so it never enters a default dependency graph.
 `anymount` has exactly one Windows backend: cfapi. There is no `projfs`
 feature, no `Backend::ProjFs`, and no ProjFS code in the tree.
 
-This was a deliberate call made in the Phase 0 spike (`docs/PLAN.md`), not an
-oversight or a placeholder for later. ProjFS was checked for a capability
+This was a deliberate call, not an oversight or a placeholder for later.
+ProjFS was checked for a capability
 cfapi lacks and none was found for this crate's scope: ProjFS cannot intercept
 writes at all (moot for a read-only crate anyway), both backends hydrate
 through the same NTFS reparse-point/minifilter mechanism so `mmap` would not
@@ -82,9 +77,7 @@ Meanwhile ProjFS carried two real costs cfapi doesn't:
 - ProjFS needs a one-time admin step,
   `Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart`.
   cfapi needs none — `CldApi.dll` ships enabled on every Windows 10 1709+
-  install, confirmed via `CfGetPlatformInfo` in the Phase 0 spike, and
-  `CfRegisterSyncRoot` was confirmed to register a sync root from an
-  unpackaged binary.
+  install, and `CfRegisterSyncRoot` works from an unpackaged binary.
 
 *To change:* this would mean re-adding a Windows backend from scratch, not
 restoring a stub — there is nothing here to un-comment. It would only be worth
@@ -96,87 +89,21 @@ binary* from starting rather than yielding a catchable error. Any new ProjFS
 code must resolve entry points dynamically (`GetProcAddress` or
 delay-loading), never link them statically.
 
-## macOS: no FSKit backend — third-party FSKit modules do not load on this OS build
-
-Moot for macOS as actually shipped: the decided macOS backend is NFS, not
-FUSE, so none of this section applies to normal use. Kept in full below as
-background for why FUSE (and its FSKit alternatives) were set aside — and
-because `fuse`/macFUSE remains an available fallback if NFS ever turns out to
-have a blocking problem of its own. See `docs/PLAN.md`'s "Revised decision"
-section for the full history. Skip to the next section unless debugging the
-FUSE fallback specifically.
+## macOS: no FSKit backend
 
 FSKit (macOS 15.4+) is Apple's kernel-extension-free framework for user-space
-filesystems, and would in principle be the modern kext-free path on macOS —
-either through macFUSE's own FSKit backend, or a filesystem written directly
-against FSKit. Neither is usable today. This is a platform-level finding, not
-specific to `fuser` or to this crate.
+filesystems, and would in principle be a kext-free alternative to NFS. It is
+not usable as of this writing: third-party FSKit modules — including
+macFUSE's own signed FSKit backend — fail to authorize on current macOS
+builds (`fskitd` cannot resolve a Developer Team ID for the module; tracked
+upstream at
+[`andrewgazelka/loaf#1`](https://github.com/andrewgazelka/loaf/issues/1)).
+Moot for `anymount` either way, since NFS is the shipped macOS backend and
+does not depend on FSKit — see `docs/ARCHITECTURE.md` for why NFS was chosen
+over FUSE/macFUSE.
 
-`fuser` cannot reach macFUSE's FSKit backend. `fuser` 0.18 (the FUSE
-binding this crate uses) hardwires macOS mounting to `fuse_mount_compat25`, a
-legacy libfuse2-compatible C entry point (`fuser-0.18.0/build.rs`,
-unconditional on `target_os = "macos"`, never probes `fuse3`). Passing
-`MountOption::CUSTOM("backend=fskit")` through that entry point fails
-immediately with no FSKit or XPC activity in the system log.
-
-Tracing macFUSE's own public source (`github.com/macfuse/library`,
-`github.com/macfuse/mount`, `github.com/macfuse/framework`) explains why: the
-open-source C library (what `fuse.pc` resolves to, and what `fuser` links
-against) has no knowledge of `backend=fskit` at all. At mount time
-(`mount_darwin.c`) it always `execv()`s an external helper, `mount_macfuse`,
-passing the `-o` string through verbatim — the *helper* decides what to do
-with `backend=fskit`, using Swift bridge classes (`Mount/Mounter.swift`) that
-build an XPC request naming `"backend": "fskit"`. `mount_macfuse` itself is
-not in any of macFUSE's public repositories — it ships only as a prebuilt,
-signed binary inside the `.pkg`. So there is no way to reach the FSKit path by
-building macFUSE from source or by writing custom FFI against the public C
-API; the routing logic is closed-source either way.
-
-Even macFUSE's official, signed FSKit module fails to authorize on this
-machine (macOS 26.6.2, build 25G83). After installing macFUSE 5.3.3,
-launching `macfuse.app` once to register its FSKit app extensions
-(`pluginkit -m` then lists `io.macfuse.app.fsmodule.macfuse` and `-local`),
-System Settings → General → Login Items & Extensions → Extensions → macFUSE →
-FSKit Modules shows both modules but the toggle to enable either is disabled —
-it cannot even be clicked. `log stream` during the attempt shows the cause:
-
-```
-fskitd[428]: About to get current agent for 501
-fskitd[428]: Received error '(null)', errno 2, retrieving team ID
-```
-
-repeated on every attempt. `fskitd` cannot resolve a Developer Team ID for the
-module at all (errno 2 = ENOENT on the lookup itself), so the settings UI
-never reaches an allow/deny decision. This is the same class of bug reported
-upstream for a from-scratch FSKit module:
-[`andrewgazelka/loaf#1`](https://github.com/andrewgazelka/loaf/issues/1),
-"FSKit third-party extensions broken on macOS 26" — there `fskitd` logs an
-explicit entitlement denial (`Hello FSClient! entitlement no`) rather than a
-team-ID lookup failure, against earlier builds (25B78, 25C56), but the shape is
-the same: `fskitd` refuses to authorize a third-party FSKit module regardless
-of signing or entitlements. A from-scratch FSKit filesystem (e.g. via
-`KhaosT/FSKitSample`, Apache-2.0) would very likely hit the same wall once
-built, independent of whatever crate or hand-written FFI serves it.
-
-Also unresolved, and moot until the above is fixed: whether `FSUnaryFileSystem`
-can serve purely synthetic content or requires a real block-device resource.
-Apple's own sample mounts against a dummy `hdiutil`-created raw disk image
-rather than truly resource-less content, but macFUSE's FSKit backend
-demonstrably mounts a synthetic in-memory tree, so this constraint (if it is
-one) is not fundamental to FSKit — just unconfirmed from first-hand testing
-here.
-
-*Practical consequence:* mounting through this crate on macOS requires
-approving macFUSE's kernel extension — and on Apple Silicon, that approval
-path itself has a cost worth knowing up front (see below), not just a click.
-
-*To change:* retest once Apple ships a `fskitd` fix (track
-`andrewgazelka/loaf#1` or file a fresh report) — first against macFUSE's own
-FSKit module (no crate changes needed, since `mount_macfuse` handles it), then
-reconsider a `fuser` upgrade or hand-written FFI if a bare `fuse_mount`-style
-entry point regains relevance. A from-scratch FSKit filesystem is a separate,
-larger option gated on the same `fskitd` fix, not on anything in this crate.
-Moot for the decided NFS backend either way — see the top of this section.
+*To change:* retest once Apple ships a `fskitd` fix. Only relevant if NFS
+ever needs a fallback.
 
 ## macOS: approving macFUSE's kernel extension requires lowering boot security (Apple Silicon)
 
@@ -228,7 +155,7 @@ idle-evicting handle cache keyed by `Ino` would remove that cost.
 *To change:* add a `Mutex<HashMap<Ino, (FileHandle, Instant)>>` (or similar) to
 `backend/nfs/mod.rs`'s per-mount state, with an eviction sweep on read
 staleness. Worth doing only once a real workload shows the round trip
-mattering; `ciphercask` (Phase 3) does not need it yet.
+mattering; the first consumer does not need it yet.
 
 ## cfapi: no per-inode handle cache — `FETCH_DATA` pays an open/release round trip
 
@@ -280,6 +207,9 @@ is set, then dispatch the reassembled body.
 this could in principle leak has not been measured. A mount is bound to
 `127.0.0.1` only, which limits who could ever attempt this, but the posture
 is unmeasured, not verified safe.
+
+Still true at 1.0: this was reviewed before the 1.0 tag and left as is, on the
+same loopback-only reasoning above, not overlooked.
 
 *To change:* use a constant-time comparison (e.g. `subtle::ConstantTimeEq`) if
 this ever needs a stronger guarantee than "loopback-only."
@@ -345,7 +275,8 @@ quietly doing nothing.
 *To change:* nothing to change for `auto_unmount` — dropping the `Mount`
 unmounts on every backend, which is what it was for. Exposing an NFS mount to
 other users would mean real per-user authorization in place of the handle
-secret, which `docs/PLAN.md`'s Phase 0.6 deliberately rejected.
+secret — see `docs/ARCHITECTURE.md`'s platform constraints for why the
+current secret-based scheme was chosen over `AUTH_SYS`.
 
 ## `..` reports the directory's own inode when `lookup(dir, "..")` is unanswered
 

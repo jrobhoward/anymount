@@ -14,8 +14,8 @@
 //! ```no_run
 //! use anymount::MountBuilder;
 //! # fn example<F: anymount::ReadOnlyFs>(my_fs: F) -> anymount::Result<()> {
-//! let mount = MountBuilder::new("/mnt/restore")
-//!     .fs_name("mybackup")
+//! let mount = MountBuilder::new("/mnt/myfs")
+//!     .fs_name("myfs")
 //!     .mount(my_fs)?;
 //!
 //! println!("mounted at {}", mount.mountpoint().display());

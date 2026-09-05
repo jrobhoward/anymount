@@ -1,5 +1,5 @@
 //! Windows Cloud Files (cfapi) backend — the only Windows backend `anymount`
-//! ships. `docs/PLAN.md` (Phase 0) covers why ProjFS was evaluated and cut.
+//! ships. See `docs/ARCHITECTURE.md` for why ProjFS was evaluated and cut.
 //!
 //! Registers the mountpoint as a Cloud Files sync root (`CfRegisterSyncRoot`)
 //! and connects a callback table (`CfConnectSyncRoot`) that answers
@@ -24,19 +24,19 @@
 //!
 //! # Read pattern
 //!
-//! Phase 2's spike found cfapi has no ranged-read path an application can
-//! reach: `FETCH_DATA` always requests the whole file (`RequiredFileOffset ==
-//! 0`, `RequiredLength ==` the file size) regardless of hydration policy or
+//! cfapi has no ranged-read path an application can reach: `FETCH_DATA`
+//! always requests the whole file (`RequiredFileOffset == 0`,
+//! `RequiredLength ==` the file size) regardless of hydration policy or
 //! buffering — see [`ReadOnlyFs`]'s "Read patterns differ by backend" docs.
 //! [`ReadOnlyFs::read_at`] is still called here at increasing offsets in
 //! [`TRANSFER_CHUNK`]-sized pieces rather than once for the whole range, so a
-//! large backup file streams through a bounded buffer instead of being
-//! materialised in memory by this backend.
+//! large file streams through a bounded buffer instead of being materialised
+//! in memory by this backend.
 //!
 //! # Directory population
 //!
-//! `CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS` carries no size budget (confirmed in
-//! the Phase 2 spike, unlike NFS's `READDIR`), so [`readdir::emit`] is used
+//! `CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS` carries no size budget (unlike NFS's
+//! `READDIR`), so [`readdir::emit`] is used
 //! with [`Dots::Omit`] and a sink that always accepts. [`ReadOnlyFs::readdir`]
 //! may still page, and `emit` walks those pages, so the sink sees the whole
 //! directory however the implementation chose to hand it over; it is then sent
@@ -339,11 +339,11 @@ fn register_sync_root(path_wide: &[u16], fs_name: &str) -> Result<()> {
         ProviderId: PROVIDER_ID,
     };
     // `Population::Primary::PARTIAL` is on-demand enumeration; `Hydration`
-    // pairs `FULL` (matching the Phase 2 finding that cfapi never does
-    // partial reads) with `STREAMING_ALLOWED` (fetched data is not persisted
-    // beyond what NTFS needs to satisfy the read) and
-    // `AUTO_DEHYDRATION_ALLOWED` (Windows can reclaim hydrated files under
-    // disk pressure without this backend managing eviction itself).
+    // pairs `FULL` (cfapi never does partial reads) with `STREAMING_ALLOWED`
+    // (fetched data is not persisted beyond what NTFS needs to satisfy the
+    // read) and `AUTO_DEHYDRATION_ALLOWED` (Windows can reclaim hydrated
+    // files under disk pressure without this backend managing eviction
+    // itself).
     let policies = CF_SYNC_POLICIES {
         StructSize: size_of::<CF_SYNC_POLICIES>() as u32,
         Hydration: CF_HYDRATION_POLICY {
@@ -682,7 +682,7 @@ fn handle_fetch_data<F: ReadOnlyFs>(info: &CF_CALLBACK_INFO, params: &CF_CALLBAC
 /// Every chunk actually read is transferred with success as it's read, rather
 /// than buffering the whole range in memory first — cfapi always requests the
 /// whole file in one `FETCH_DATA` call (see this module's docs), so for a
-/// large backup archive this keeps memory use bounded to one chunk. On
+/// large file this keeps memory use bounded to one chunk. On
 /// failure partway through, the remaining, untransferred range is failed
 /// explicitly with the mapped `NTSTATUS` so the platform does not wait out its
 /// callback timeout for bytes that are never coming.

@@ -43,8 +43,8 @@ impl std::fmt::Display for FileHandle {
 /// What an inode is.
 ///
 /// Deliberately only two variants: symlinks are not represented because the
-/// first consumer (ciphercask) does not back them up, and cfapi does not model
-/// them the way FUSE does. See `docs/GAPS.md`.
+/// first consumer does not back them up, and cfapi does not model them the
+/// way FUSE does. See `docs/GAPS.md`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FileKind {
     /// A regular file, whose contents come from

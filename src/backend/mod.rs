@@ -114,10 +114,9 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<Mount
 ///
 /// Windows uses cfapi: it needs no one-time admin feature enable, can stream
 /// without persisting data to disk, dehydrates automatically, and
-/// `CfRegisterSyncRoot` is confirmed to work unpackaged (Phase 0,
-/// `docs/PLAN.md`). ProjFS was evaluated and is not used — see `docs/GAPS.md`.
-/// macOS uses the NFSv3 backend, mounted with the OS's built-in `mount_nfs`
-/// client.
+/// `CfRegisterSyncRoot` works unpackaged. ProjFS was evaluated and is not
+/// used — see `docs/ARCHITECTURE.md` and `docs/GAPS.md`. macOS uses the
+/// NFSv3 backend, mounted with the OS's built-in `mount_nfs` client.
 #[allow(unused_variables, unused_mut)]
 fn auto_mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<Box<dyn Mounted>> {
     #[cfg(all(target_os = "linux", feature = "fuse"))]

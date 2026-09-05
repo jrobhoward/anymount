@@ -62,8 +62,8 @@ impl ReadOnlyFs for OneFile {
 
 #[test]
 fn read_only_fs____used_as_a_trait_object____is_object_safe() {
-    // ciphercask will likely hold this as `Box<dyn ReadOnlyFs>` so the cask
-    // backend can be chosen at runtime; keep that possible.
+    // The first consumer will likely hold this as `Box<dyn ReadOnlyFs>` so
+    // the backend can be chosen at runtime; keep that possible.
     let fs: Box<dyn ReadOnlyFs> = Box::new(OneFile);
     assert_eq!(fs.getattr(ROOT_INO).unwrap().kind, FileKind::Directory);
 }

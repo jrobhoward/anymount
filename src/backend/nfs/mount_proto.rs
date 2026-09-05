@@ -3,8 +3,8 @@
 //! Single-export server: the only valid `dirpath` is `/export/<32 lowercase
 //! hex chars>`, where the hex is this mount's [`FileHandle3`] secret. Any
 //! other shape is `MNT3ERR_NOENT`; the right shape with the wrong secret is
-//! `MNT3ERR_ACCES`, matching `mount_nfs`'s observed "Permission denied, exit
-//! 13" when the spike deliberately supplied a wrong secret.
+//! `MNT3ERR_ACCES`, which `mount_nfs` reports as "Permission denied, exit
+//! 13".
 
 use crate::types::ROOT_INO;
 

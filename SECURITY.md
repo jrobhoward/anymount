@@ -18,7 +18,7 @@ embeds it. Three areas are the crate's own:
 - The macOS NFS server. It binds to `127.0.0.1` on an ephemeral port, so any
   local process can connect to it. Authorization is a 128-bit per-mount secret
   embedded in every file handle and required as a path segment in `MNT`; there
-  is no credential checking beyond that, by design (`docs/PLAN.md`, Phase 0.6).
+  is no credential checking beyond that, by design (see `docs/ARCHITECTURE.md`).
   A way to read or enumerate a mount's contents without holding that secret is
   a vulnerability. So is a message that panics a server thread, hangs it, or
   makes it allocate proportionally to what a client claims rather than to what

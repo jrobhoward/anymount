@@ -1,4 +1,4 @@
-//! Phase 0 spike driver: report what this machine can actually mount.
+//! Reports what this machine can actually mount.
 //!
 //! Run this first on each OS. It needs no mountpoint and no privileges, so it
 //! isolates "are the build and runtime dependencies present?" from "does

@@ -6,7 +6,7 @@
 //!
 //! v1 scope: single-fragment TCP messages only. A multi-fragment request
 //! closes the connection rather than reassembling — every `mount_nfs`
-//! request observed in the spike fits in one fragment.
+//! request fits in one fragment in practice.
 
 use std::io::{self, Read, Write};
 

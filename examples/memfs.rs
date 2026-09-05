@@ -1,4 +1,4 @@
-//! Phase 0 spike driver: mount a tiny in-memory tree and serve it.
+//! Mounts a tiny in-memory tree and serves it.
 //!
 //! ```text
 //! /

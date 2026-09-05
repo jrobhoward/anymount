@@ -4,7 +4,7 @@
 //! protocol (RFC 1813 Appendix I) it needs, hand-rolled over `std::net`, with
 //! the OS's own `mount_nfs` client doing the actual mounting — no macFUSE, no
 //! kernel extension, no Reduced Security boot policy, no root. See
-//! `docs/PLAN.md`'s Phase 0.6 for how this mechanism was chosen and proven.
+//! `docs/ARCHITECTURE.md` for how this mechanism was chosen.
 //!
 //! Single-export, single-connection-set server: one [`FileHandle3`] secret
 //! per mount authorizes every handle this server ever hands out, and every

@@ -106,8 +106,16 @@ explicitly does the same thing and returns the errors that dropping discards.
 
 ## Caveats worth knowing before use
 
+1.0 is feature-complete. None of the limitations below were required by the
+crate's original use case, so none are planned for a 1.x release; a future
+version that adds one is likely a 2.0, since the value types below are not
+`#[non_exhaustive]`.
+
 - Read-only. Write operations report `EROFS`, and that is the scope rather
   than a stage. Every limitation is catalogued in [`docs/GAPS.md`](docs/GAPS.md).
+- No symlinks or hardlinks: `FileKind` has only `File` and `Directory`.
+- No extended attributes beyond `listxattr`/`getxattr`'s harmless defaults,
+  and no Windows alternate data streams.
 - The Windows mountpoint must be an empty directory. cfapi projects its
   entries into that directory rather than covering it, and clears them again
   on unmount, so mounting over existing files would destroy them; `mount()`
@@ -117,7 +125,6 @@ explicitly does the same thing and returns the errors that dropping discards.
 - `read_at` takes an offset, but only FUSE issues random reads. cfapi fetches
   a whole file on first touch. An archive that can only decode from byte 0
   should materialise on open and serve reads from a cache.
-- No symlinks: `FileKind` has only `File` and `Directory`.
 - The trait is synchronous. Concurrency comes from serving requests on several
   threads, not from async.
 
@@ -140,17 +147,17 @@ All three backends mount, read and unmount, and each is exercised against a
 real mount in CI on its own platform — `ls`, `cat`, `find`, and a checksum
 compared against one computed outside the mount.
 
-macOS went through three mechanisms before landing on one: FUSE hit Apple
-Silicon boot-security friction, WebDAV made Finder download every file in a
-viewed folder, and a from-scratch unprivileged NFS server avoided both.
-[`docs/PLAN.md`](docs/PLAN.md) has the history and why each earlier choice was
-set aside.
+## Why three backends, not one mechanism everywhere
 
-## Why not an existing crate?
-
-Nothing in Rust spans all three platforms behind one API. `fuser` and `fuse3`
-are Unix-only; `winfsp`, `dokan` and `windows-projfs` are Windows-only and
-copyleft. The nearest equivalent in any language is Go's `cgofuse`.
+Nothing in Rust spans all three platforms behind one API — the nearest
+equivalent in any language is Go's `cgofuse`, which does not cover Windows.
+So each platform gets the mechanism that fits it best rather than a lowest
+common denominator: FUSE on Linux, a from-scratch NFSv3 server on macOS
+(FUSE there needs a kernel extension; WebDAV made Finder download a whole
+file on every folder view), and the Cloud Files API on Windows (ProjFS was
+evaluated and set aside — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)).
+`winfsp`, `dokan` and `windows-projfs` are also Windows-only and copyleft;
+see Licensing below.
 
 ## Licensing
 
@@ -212,8 +219,9 @@ cargo check --target aarch64-apple-darwin --all-targets
 cargo +1.88.0 check --all-targets
 ```
 
-[`CLAUDE.md`](CLAUDE.md) records the conventions and platform constraints a
-contributor needs before editing a backend.
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) covers the module layout and
+design rationale; [`CLAUDE.md`](CLAUDE.md) records the conventions and
+platform constraints a contributor needs before editing a backend.
 
 ## License
 

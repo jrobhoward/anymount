@@ -4,7 +4,7 @@
 //! the `fusermount3` helper binary rather than linking libfuse. That keeps
 //! LGPL code out of the link *and* permits unprivileged mounts.
 //!
-//! macOS's decided backend is NFS, not FUSE — see `docs/PLAN.md` — so this
+//! macOS's backend is NFS, not FUSE — see `docs/ARCHITECTURE.md` — so this
 //! module is gated to Linux only (`backend/mod.rs`). There is no macFUSE
 //! fallback in the tree.
 
@@ -29,8 +29,9 @@ use crate::types::{FileAttr, FileHandle, FileKind, Ino};
 
 /// How long the kernel may cache attributes and lookups.
 ///
-/// A backup snapshot is immutable for the life of the mount, so a long TTL is
-/// safe and removes most of the round-trips a shorter value would cost.
+/// Content served by a read-only filesystem is immutable for the life of the
+/// mount, so a long TTL is safe and removes most of the round-trips a
+/// shorter value would cost.
 const TTL: Duration = Duration::from_secs(60);
 
 /// Inodes are stable for the life of a mount, so generations are never reused.
