@@ -49,13 +49,13 @@ cargo test some____test____name                  # single test
 cargo clippy --all-targets -- -Dwarnings
 cargo fmt --all -- --check
 
-# Cross-compile checks for the other OS backend (no linker needed for `check`).
-# Windows checks fully. macOS has no backend in the tree yet (see "What this
-# is"), so this only proves the platform-independent parts still compile
-# there; it needs no default-features flag since `fuse` is Linux-only and a
-# no-op off it.
+# Cross-compile checks for the other OS backends (no linker needed for
+# `check`). Both need `--all-targets`: without it the `*_tests.rs` files are
+# not compiled, and a `cfg`-gated test referring to something that has been
+# renamed sails straight through.  `fuse` is Linux-only and a no-op off it, so
+# no default-features flag is needed.
 cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -Dwarnings
-cargo check --target aarch64-apple-darwin
+cargo check --target aarch64-apple-darwin --all-targets
 
 # Supply chain — run before adding or updating any dependency
 cargo deny check licenses bans sources
@@ -91,10 +91,25 @@ Single crate, edition 2024, `rust-version = 1.88.0`.
 - `backend/` — one module per OS mechanism, `cfg`-gated *and* feature-gated:
   `fuse.rs` (Linux only), `nfs/` (macOS only — a submodule tree: `mod.rs`,
   `xdr.rs`, `rpc.rs`, `mount_proto.rs`, `nfs_proto.rs`, `handle.rs`,
-  `server.rs`), `cfapi.rs` (Windows). `readdir_cookie.rs` holds the `.`/`..`
-  cookie arithmetic shared by `fuse.rs` and `nfs/nfs_proto.rs`, compiled and
-  tested unconditionally rather than gated to either. `backend/mod.rs`
-  resolves `Backend::Auto` and owns the `MountHandle` enum.
+  `server.rs`), `cfapi.rs` (Windows). `backend/mod.rs` resolves
+  `Backend::Auto`; it and its sibling modules hold the seams every backend
+  shares, so a backend supplies only a `mount` function, a `Mounted` impl and
+  a `Caps`:
+  - `Mounted` — the trait a backend's live handle implements. `unmount`
+    consumes the handle, so `Mount` calls it from both `Mount::unmount` and
+    its own `Drop` and it runs exactly once. Unmount-on-drop is therefore a
+    guarantee the crate makes uniformly; a backend needs no `Drop` and no
+    idempotence flag of its own.
+  - `preflight.rs` — `Caps` (what a backend can honor) and `check`, run
+    before any platform code. See "Unsupported builder options" below.
+  - `readdir.rs` — the `.`/`..` cookie arithmetic *and* `emit`, the driver
+    that walks one paginated, resumable listing. `fuse.rs` and
+    `nfs/nfs_proto.rs` differ only in their `Sink` closure; cfapi will pass
+    `Dots::Omit` and reuse the pagination alone. Compiled and tested
+    unconditionally rather than gated to a backend.
+  - `trace.rs` — `backend_warn!`/`backend_info!`, no-ops without the
+    `tracing` feature. Use these where an error is deliberately discarded
+    (a failed `release`, a failed unmount during `drop`); never `let _ =`.
 
 ### Why it looks like this
 
@@ -114,6 +129,15 @@ without revisiting that:
   the trait does not change when true streaming becomes possible.
 
 ## Platform constraints worth knowing before editing a backend
+
+**Unsupported builder options are a hard error, not a no-op.** `allow_other`
+and `auto_unmount` are FUSE mount options with no NFS or cfapi counterpart.
+Rather than silently ignoring them off Linux, each backend declares a `Caps`
+and `preflight` (`backend/mod.rs`) rejects the request at `mount()` naming the
+backend. `preflight` also checks the mountpoint exists and is a directory, so
+all three platforms report the same actionable error instead of passing
+through whatever their helper binary prints. A new backend adds a `Caps`, not
+a fourth policy.
 
 **FUSE `auto_unmount` requires a non-`Owner` ACL.** `fusermount3` refuses to arm
 it on an owner-private mount, so `auto_unmount` defaults off and `mount()`
@@ -220,9 +244,11 @@ the same name and signature, not an inline `cfg!` branch.
 
 **Property tests:** reach for `proptest` (dev-dependency) when a pure function
 has a round-trip or arithmetic invariant worth checking across many inputs, not
-just a couple of hand-picked examples — `backend/fuse_tests.rs`'s `cookie`
-module tests (readdir cookie encode/decode, and a simulated multi-call
-pagination) are the template. Don't reach for it for ordinary example-based
+just a couple of hand-picked examples — `backend/readdir_tests.rs` is the
+template: cookie encode/decode, plus a multi-call pagination property that
+drives the real `readdir::emit` rather than a simulation of it. Prefer
+restructuring production code into a testable pure function over
+re-implementing its logic in the test file. Don't reach for it for ordinary example-based
 behavior; a `subject____condition____result` unit test is still the default.
 
 ## Code Style
@@ -257,6 +283,8 @@ Before considering any task or phase complete:
 - New public items have doc comments
 - If behaviour changed on a platform, it was verified with real tools there, or
   the fact that it was not is stated plainly
+- Anything touching `backend/mod.rs`, `backend/readdir.rs` or a `Mounted` impl
+  is checked on every target with `--all-targets`, not just the host
 
 ## Docs are part of "done"
 

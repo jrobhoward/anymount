@@ -63,6 +63,9 @@ impl MountBuilder {
     ///
     /// Requires `user_allow_other` in `/etc/fuse.conf`. Off by default because
     /// a backup mount is normally private to one user.
+    ///
+    /// FUSE only. The NFS and cfapi backends have no equivalent and reject the
+    /// request at [`mount`](Self::mount) time rather than ignoring it.
     pub fn allow_other(mut self, yes: bool) -> Self {
         self.allow_other = yes;
         self
@@ -70,11 +73,14 @@ impl MountBuilder {
 
     /// Unmount if the process dies.
     ///
-    /// **Off by default, and requires [`allow_other`](Self::allow_other).** FUSE
+    /// Off by default, and requires [`allow_other`](Self::allow_other). FUSE
     /// implements `auto_unmount` inside the `fusermount3` helper, which refuses
     /// it for an owner-private mount; enabling one without the other is
     /// rejected at [`mount`](Self::mount) time. A private mount left behind by a
     /// crash is cleared with `fusermount3 -u <mountpoint>`.
+    ///
+    /// FUSE only, on the same terms as [`allow_other`](Self::allow_other). An
+    /// orderly exit needs it on no backend: dropping the [`Mount`] unmounts.
     pub fn auto_unmount(mut self, yes: bool) -> Self {
         self.auto_unmount = yes;
         self
@@ -87,20 +93,62 @@ impl MountBuilder {
 }
 
 /// A live mount. Unmounts on drop.
+///
+/// Teardown runs exactly once, from whichever comes first — [`unmount`] or
+/// `drop` — because the handle is consumed. Every backend routes through the
+/// same path, so "unmounts on drop" is a promise this type makes rather than a
+/// side effect of the platform library underneath.
+///
+/// [`unmount`]: Mount::unmount
 pub struct Mount {
-    pub(crate) inner: backend::MountHandle,
-    pub(crate) mountpoint: PathBuf,
+    /// `None` once teardown has run.
+    inner: Option<Box<dyn backend::Mounted>>,
+    mountpoint: PathBuf,
+    /// Cached from the handle, so it stays reportable after teardown.
+    backend: Backend,
 }
 
 impl Mount {
+    pub(crate) fn new(inner: Box<dyn backend::Mounted>, mountpoint: PathBuf) -> Self {
+        Self {
+            backend: inner.backend(),
+            inner: Some(inner),
+            mountpoint,
+        }
+    }
+
     /// Where this filesystem is mounted.
     pub fn mountpoint(&self) -> &Path {
         &self.mountpoint
     }
 
+    /// Which platform mechanism is serving this mount.
+    ///
+    /// Never [`Backend::Auto`]: that is resolved to a concrete backend at
+    /// mount time.
+    pub fn backend(&self) -> Backend {
+        self.backend
+    }
+
     /// Unmount explicitly, surfacing errors that `drop` would swallow.
-    pub fn unmount(self) -> Result<()> {
-        self.inner.unmount()
+    pub fn unmount(mut self) -> Result<()> {
+        match self.inner.take() {
+            Some(handle) => handle.unmount(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Mount {
+    fn drop(&mut self) {
+        if let Some(handle) = self.inner.take()
+            && let Err(e) = handle.unmount()
+        {
+            backend::trace::backend_warn!(
+                "anymount: unmounting {} during drop failed: {e}",
+                self.mountpoint.display()
+            );
+        }
     }
 }
 
@@ -108,6 +156,7 @@ impl std::fmt::Debug for Mount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Mount")
             .field("mountpoint", &self.mountpoint)
+            .field("backend", &self.backend)
             .finish_non_exhaustive()
     }
 }

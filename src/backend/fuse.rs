@@ -18,10 +18,13 @@ use fuser::{
     ReplyStatfs, ReplyXattr, Request, SessionACL,
 };
 
-use crate::backend::readdir_cookie as cookie;
+use crate::backend::Mounted;
+use crate::backend::preflight::{self, Caps};
+use crate::backend::readdir::{self, Dots, Sink};
+use crate::backend::trace::backend_warn;
 use crate::error::{FsError, Result};
 use crate::fs::ReadOnlyFs;
-use crate::mount::MountBuilder;
+use crate::mount::{Backend, MountBuilder};
 use crate::types::{FileAttr, FileHandle, FileKind, Ino};
 
 /// How long the kernel may cache attributes and lookups.
@@ -33,21 +36,52 @@ const TTL: Duration = Duration::from_secs(60);
 /// Inodes are stable for the life of a mount, so generations are never reused.
 const GENERATION: Generation = Generation(0);
 
-/// Live FUSE session. Unmounts when dropped.
+/// Worker threads serving kernel requests, so one slow read cannot stall the
+/// whole mount. Four is enough to keep a single reader plus a directory walk
+/// from queueing behind each other without making an implementor's locking a
+/// bottleneck.
+const WORKER_THREADS: usize = 4;
+
+/// Upper bound on a single `read` allocation.
+///
+/// The kernel negotiates its own maximum and does not exceed it, so this is a
+/// belt-and-braces cap on trusting a `size` field, mirroring the NFS backend's
+/// `RTMAX`. A short read is valid at end-of-file, and the kernel reissues for
+/// the remainder, so capping cannot lose data.
+const MAX_READ: u32 = 16 * 1024 * 1024;
+
+const CAPS: Caps = Caps {
+    name: "fuse",
+    allow_other: true,
+    auto_unmount: true,
+};
+
+/// Live FUSE session.
+#[derive(Debug)]
 pub(crate) struct FuseHandle {
-    session: Option<BackgroundSession>,
+    session: BackgroundSession,
 }
 
-impl FuseHandle {
-    pub(crate) fn unmount(mut self) -> Result<()> {
-        if let Some(session) = self.session.take() {
-            session.umount_and_join()?;
-        }
+impl Mounted for FuseHandle {
+    /// `umount_and_join` both unmounts and joins the serving thread. Dropping a
+    /// [`BackgroundSession`] would unmount too — `fuser::Mount`'s own `Drop`
+    /// does that — but would leave the thread detached, so teardown always goes
+    /// through here rather than through the drop glue.
+    fn unmount(self: Box<Self>) -> Result<()> {
+        self.session.umount_and_join()?;
         Ok(())
+    }
+
+    fn backend(&self) -> Backend {
+        Backend::Fuse
     }
 }
 
 pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<FuseHandle> {
+    preflight::check(&builder, &CAPS)?;
+
+    // Not a capability gap — FUSE supports both options, just not together —
+    // so this stays here rather than in `Caps`.
     if builder.auto_unmount && !builder.allow_other {
         return Err(FsError::InvalidArgument.context(
             "auto_unmount requires allow_other: fusermount3 refuses to arm \
@@ -72,17 +106,15 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<FuseH
     } else {
         SessionACL::Owner
     };
-    // Serve requests on several threads so one slow read cannot stall the
-    // whole mount; `clone_fd` gives each worker its own fd (Linux 4.5+).
-    config.n_threads = Some(4);
-    config.clone_fd = cfg!(target_os = "linux");
+    config.n_threads = Some(WORKER_THREADS);
+    // Each worker gets its own fd (Linux 4.5+). This module is Linux-only, so
+    // there is no platform to condition on.
+    config.clone_fd = true;
 
     let adapter = FuseAdapter { fs: Arc::new(fs) };
     let session = fuser::spawn_mount(adapter, &builder.mountpoint, &config)?;
 
-    Ok(FuseHandle {
-        session: Some(session),
-    })
+    Ok(FuseHandle { session })
 }
 
 /// Translates `fuser::Filesystem` callbacks into [`ReadOnlyFs`] calls.
@@ -132,7 +164,7 @@ impl<F: ReadOnlyFs> fuser::Filesystem for FuseAdapter<F> {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        let mut buf = vec![0u8; size as usize];
+        let mut buf = vec![0u8; read_buffer_len(size)];
         match self.fs.read_at(FileHandle(fh.0), offset, &mut buf) {
             Ok(n) => {
                 buf.truncate(n);
@@ -153,8 +185,10 @@ impl<F: ReadOnlyFs> fuser::Filesystem for FuseAdapter<F> {
         reply: ReplyEmpty,
     ) {
         // A failed release cannot be reported usefully to the application, so
-        // the error is dropped rather than turned into a spurious errno.
-        let _ = self.fs.release(FileHandle(fh.0));
+        // it is logged rather than turned into a spurious errno.
+        if let Err(e) = self.fs.release(FileHandle(fh.0)) {
+            backend_warn!("anymount/fuse: release of handle {} failed: {e}", fh.0);
+        }
         reply.ok();
     }
 
@@ -172,37 +206,26 @@ impl<F: ReadOnlyFs> fuser::Filesystem for FuseAdapter<F> {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        let mut next = offset;
-        if next == 0 {
-            if reply.add(ino, cookie::DOT, fuser::FileType::Directory, ".") {
-                reply.ok();
-                return;
-            }
-            next = cookie::DOT;
-        }
-        if next == cookie::DOT {
-            if reply.add(ino, cookie::DOTDOT, fuser::FileType::Directory, "..") {
-                reply.ok();
-                return;
-            }
-            next = cookie::DOTDOT;
-        }
-
-        match self.fs.readdir(Ino(ino.0), cookie::trait_offset(next)) {
-            Ok(entries) => {
-                for (i, entry) in entries.iter().enumerate() {
-                    let c = cookie::for_entry(cookie::trait_offset(next) + i as u64);
-                    if reply.add(
-                        INodeNo(entry.ino.0),
-                        c,
-                        to_fuser_kind(entry.kind),
-                        &entry.name,
-                    ) {
-                        break;
-                    }
+        // `ReplyDirectory::add` returns `true` when the entry did *not* fit,
+        // which is exactly `Sink::Full`; everything else about the listing —
+        // synthesizing `.`/`..`, the cookie arithmetic, resuming mid-directory
+        // — lives in `backend::readdir` and is shared with the NFS backend.
+        let outcome = readdir::emit(
+            self.fs.as_ref(),
+            Ino(ino.0),
+            offset,
+            Dots::Synthesize,
+            |e| {
+                if reply.add(INodeNo(e.ino.0), e.cookie, to_fuser_kind(e.kind), e.name) {
+                    Sink::Full
+                } else {
+                    Sink::Accepted
                 }
-                reply.ok();
-            }
+            },
+        );
+
+        match outcome {
+            Ok(_) => reply.ok(),
             Err(e) => reply.error(errno(&e)),
         }
     }
@@ -238,17 +261,43 @@ impl<F: ReadOnlyFs> fuser::Filesystem for FuseAdapter<F> {
     }
 }
 
-/// Shared FUSE size-query convention for `getxattr`/`listxattr`: `size == 0`
-/// asks for the value's length only, otherwise the value is returned in full
-/// or the request is rejected with `ERANGE` rather than silently truncated.
-fn reply_xattr(data: &[u8], size: u32, reply: ReplyXattr) {
+/// How a `getxattr`/`listxattr` call should be answered, decided separately
+/// from answering it so the convention can be unit tested without a live
+/// session — `ReplyXattr` can only be constructed by `fuser` itself.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum XattrReply {
+    /// The caller passed `size == 0`, asking for the length only.
+    Size(u32),
+    /// The value fits in the caller's buffer.
+    Data,
+    /// The value is larger than the buffer the caller offered.
+    TooLarge,
+}
+
+/// FUSE's size-query convention for `getxattr`/`listxattr`: `size == 0` asks
+/// for the value's length only; otherwise the value is returned in full, or
+/// the request is rejected with `ERANGE` rather than silently truncated.
+fn xattr_reply(len: usize, size: u32) -> XattrReply {
     if size == 0 {
-        reply.size(data.len() as u32);
-    } else if data.len() > size as usize {
-        reply.error(Errno::ERANGE);
+        XattrReply::Size(len as u32)
+    } else if len > size as usize {
+        XattrReply::TooLarge
     } else {
-        reply.data(data);
+        XattrReply::Data
     }
+}
+
+fn reply_xattr(data: &[u8], size: u32, reply: ReplyXattr) {
+    match xattr_reply(data.len(), size) {
+        XattrReply::Size(len) => reply.size(len),
+        XattrReply::TooLarge => reply.error(Errno::ERANGE),
+        XattrReply::Data => reply.data(data),
+    }
+}
+
+/// Bytes to allocate for a `read` of `size`, capped at [`MAX_READ`].
+fn read_buffer_len(size: u32) -> usize {
+    size.min(MAX_READ) as usize
 }
 
 fn errno(e: &FsError) -> Errno {

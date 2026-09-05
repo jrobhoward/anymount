@@ -20,17 +20,33 @@
 //! — no MSIX, no sparse package, no app identity — and it registered and
 //! unregistered a real sync root cleanly, repeatedly.
 
+use crate::backend::Mounted;
+use crate::backend::preflight::{self, Caps};
 use crate::error::{FsError, Result};
 use crate::fs::ReadOnlyFs;
-use crate::mount::MountBuilder;
+use crate::mount::{Backend, MountBuilder};
 
+/// `allow_other` and `auto_unmount` are FUSE mount options with no cfapi
+/// counterpart: a sync root is registered by, and visible to, the user running
+/// the process, and teardown is owned by [`Mounted`].
+const CAPS: Caps = Caps {
+    name: "cfapi",
+    allow_other: false,
+    auto_unmount: false,
+};
+
+#[derive(Debug)]
 pub(crate) struct CfApiHandle {
     _private: (),
 }
 
-impl CfApiHandle {
-    pub(crate) fn unmount(self) -> Result<()> {
+impl Mounted for CfApiHandle {
+    fn unmount(self: Box<Self>) -> Result<()> {
         Ok(())
+    }
+
+    fn backend(&self) -> Backend {
+        Backend::CfApi
     }
 }
 
@@ -62,7 +78,9 @@ pub fn probe() -> Option<PlatformInfo> {
     })
 }
 
-pub(crate) fn mount<F: ReadOnlyFs>(_builder: MountBuilder, _fs: F) -> Result<CfApiHandle> {
+pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, _fs: F) -> Result<CfApiHandle> {
+    preflight::check(&builder, &CAPS)?;
+
     if probe().is_none() {
         return Err(FsError::Unsupported(
             "Cloud Files API unavailable: requires Windows 10 1709 or later",

@@ -41,6 +41,11 @@ jobs:
       - run: cargo build --all-targets
       - run: cargo test
       - run: cargo clippy --all-targets -- -Dwarnings
+      # `tracing` is off by default, so its call sites are only compiled here.
+      - run: cargo clippy --all-targets --features tracing -- -Dwarnings
+      # Every backend cfg'd out: the configuration `mount()` must still build
+      # and report `FsError::Unsupported` in.
+      - run: cargo clippy --all-targets --no-default-features -- -Dwarnings
       - run: cargo doc --no-deps
 
       # Reports which backends this runner can actually use. Informational: it
@@ -72,6 +77,11 @@ jobs:
           want=$(seq 1 100 | sha256sum | cut -d' ' -f1)
           test "$got" = "$want"
           test "$(cat /tmp/anymount-ci/subdir/nested.txt)" = "I am nested."
+          # Exercises `..`-driven navigation, matching the NFS job's coverage.
+          find /tmp/anymount-ci | sort
+          # `..` must report the parent's inode, not the directory's own.
+          test "$(stat -c %i /tmp/anymount-ci/subdir/..)" = "$(stat -c %i /tmp/anymount-ci)"
+          test "$(stat -c %i /tmp/anymount-ci/subdir/..)" != "$(stat -c %i /tmp/anymount-ci/subdir)"
           wait
           ! mount | grep -qF /tmp/anymount-ci
 
@@ -100,6 +110,10 @@ jobs:
           test "$(cat /tmp/anymount-nfs-ci/subdir/nested.txt)" = "I am nested."
           # Exercises `..`-driven navigation and LOOKUP correctness end to end.
           find /tmp/anymount-nfs-ci | sort
+          # `..` must report the parent's inode, not the directory's own.
+          # `stat -f %i`, not `-c`: BSD stat, not GNU.
+          test "$(stat -f %i /tmp/anymount-nfs-ci/subdir/..)" = "$(stat -f %i /tmp/anymount-nfs-ci)"
+          test "$(stat -f %i /tmp/anymount-nfs-ci/subdir/..)" != "$(stat -f %i /tmp/anymount-nfs-ci/subdir)"
           wait
           ! mount | grep -qF /tmp/anymount-nfs-ci
 
@@ -116,11 +130,13 @@ jobs:
       - name: Check Windows backend
         run: cargo check --target x86_64-pc-windows-msvc
 
-      # `check` alone proves the macOS-specific code (backend/nfs/) still
-      # type-checks; `nfs-mount-smoke-test` above is what actually runs it,
-      # on a real macos-latest runner.
+      # `--all-targets` so the `cfg`-gated `*_tests.rs` files compile too; a
+      # plain `cargo check` skips them, and a renamed item referenced only
+      # from a macOS-gated test would go unnoticed here.
+      # `nfs-mount-smoke-test` above is what actually runs this code, on a
+      # real macos-latest runner.
       - name: Check macOS
-        run: cargo check --target aarch64-apple-darwin
+        run: cargo check --target aarch64-apple-darwin --all-targets
 
   msrv:
     name: MSRV (1.88.0)

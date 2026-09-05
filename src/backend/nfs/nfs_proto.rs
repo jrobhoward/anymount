@@ -8,7 +8,8 @@
 use std::ffi::OsStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::backend::readdir_cookie;
+use crate::backend::readdir;
+use crate::backend::trace::backend_warn;
 use crate::error::FsError;
 use crate::fs::ReadOnlyFs;
 use crate::types::{FileAttr, FileKind, Ino};
@@ -244,6 +245,14 @@ fn access<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>) -> ProcOutcome {
     ProcOutcome::Success(w)
 }
 
+/// `READ3` opens and releases a handle per call (see `docs/GAPS.md`); a
+/// failed release has no place in the reply, so it is logged.
+fn release_logging<F: ReadOnlyFs>(ctx: &Ctx<'_, F>, fh: crate::types::FileHandle) {
+    if let Err(e) = ctx.fs.release(fh) {
+        backend_warn!("anymount/nfs: release of handle {} failed: {e}", fh.0);
+    }
+}
+
 fn read<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>) -> ProcOutcome {
     let Some(fh) = r.read_opaque_var(64) else {
         return ProcOutcome::GarbageArgs;
@@ -269,9 +278,10 @@ fn read<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>) -> ProcOutcome {
             match ctx.fs.read_at(fh, offset, &mut buf) {
                 Ok(n) => {
                     buf.truncate(n);
-                    // A failed release cannot be reported usefully here;
-                    // logged elsewhere is out of scope for v1.
-                    let _ = ctx.fs.release(fh);
+                    // A failed release cannot be reported usefully to the
+                    // client, so it is logged rather than turned into a
+                    // spurious nfsstat3.
+                    release_logging(ctx, fh);
                     let attr = ctx.fs.getattr(ino).ok();
                     w.write_u32(NFS3_OK);
                     match &attr {
@@ -284,7 +294,7 @@ fn read<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>) -> ProcOutcome {
                     w.write_opaque_var(&buf);
                 }
                 Err(e) => {
-                    let _ = ctx.fs.release(fh);
+                    release_logging(ctx, fh);
                     w.write_u32(e.to_nfsstat3());
                     write_post_op_attr_best_effort(&mut w, ctx, ino);
                 }
@@ -306,10 +316,6 @@ struct DirList {
     /// `true` only once the trait's `readdir` truly ran out of entries to
     /// serve, not merely because the budget was exhausted this call.
     eof: bool,
-}
-
-fn fits(remaining: i64, candidate: &Writer) -> bool {
-    candidate.len() as i64 <= remaining
 }
 
 fn encode_dirent<F: ReadOnlyFs>(
@@ -343,7 +349,12 @@ fn encode_dirent<F: ReadOnlyFs>(
 
 /// Pack `.`, `..` and the trait's own entries (resuming from `start_cookie`)
 /// into `budget` bytes, stopping — with `eof: false` — at the first entry
-/// that would not fit, rather than dropping/truncating one already appended.
+/// that would not fit, rather than dropping or truncating one already
+/// appended.
+///
+/// The walk itself, including `.`/`..` synthesis and the cookie arithmetic, is
+/// [`readdir::emit`], shared with the FUSE backend; only the "does this entry
+/// fit the client's declared budget?" test is NFS-specific.
 fn build_dirlist<F: ReadOnlyFs>(
     ctx: &Ctx<'_, F>,
     dir: Ino,
@@ -353,56 +364,18 @@ fn build_dirlist<F: ReadOnlyFs>(
 ) -> Result<DirList, FsError> {
     let mut entries = Writer::new();
     let mut remaining = i64::from(budget);
-    let mut cookie = start_cookie;
 
-    if cookie == 0 {
-        let candidate = encode_dirent(ctx, dir, OsStr::new("."), readdir_cookie::DOT, plus);
-        if !fits(remaining, &candidate) {
-            return Ok(DirList {
-                entries,
-                eof: false,
-            });
+    let eof = readdir::emit(ctx.fs, dir, start_cookie, readdir::Dots::Synthesize, |e| {
+        let candidate = encode_dirent(ctx, e.ino, e.name, e.cookie, plus);
+        if candidate.len() as i64 > remaining {
+            return readdir::Sink::Full;
         }
         remaining -= candidate.len() as i64;
         entries.extend_from(&candidate);
-        cookie = readdir_cookie::DOT;
-    }
+        readdir::Sink::Accepted
+    })?;
 
-    if cookie == readdir_cookie::DOT {
-        let parent = ctx.fs.lookup(dir, OsStr::new(".."))?;
-        let candidate = encode_dirent(
-            ctx,
-            parent.ino,
-            OsStr::new(".."),
-            readdir_cookie::DOTDOT,
-            plus,
-        );
-        if !fits(remaining, &candidate) {
-            return Ok(DirList {
-                entries,
-                eof: false,
-            });
-        }
-        remaining -= candidate.len() as i64;
-        entries.extend_from(&candidate);
-        cookie = readdir_cookie::DOTDOT;
-    }
-
-    let offset = readdir_cookie::trait_offset(cookie);
-    let dir_entries = ctx.fs.readdir(dir, offset)?;
-    for (i, entry) in dir_entries.iter().enumerate() {
-        let entry_cookie = readdir_cookie::for_entry(offset + i as u64);
-        let candidate = encode_dirent(ctx, entry.ino, &entry.name, entry_cookie, plus);
-        if !fits(remaining, &candidate) {
-            return Ok(DirList {
-                entries,
-                eof: false,
-            });
-        }
-        remaining -= candidate.len() as i64;
-        entries.extend_from(&candidate);
-    }
-    Ok(DirList { entries, eof: true })
+    Ok(DirList { entries, eof })
 }
 
 fn readdir_common<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>, plus: bool) -> ProcOutcome {

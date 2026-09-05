@@ -1,15 +1,26 @@
 //! Per-OS backends and the dispatch that picks one.
 //!
-//! One mechanism per platform: FUSE on Linux, cfapi on Windows. macOS's
-//! decided backend is NFS (`docs/PLAN.md`), not yet built as a real
-//! `backend/nfs.rs` — macOS currently compiles in no backend at all, and
-//! `auto_mount` reports [`FsError::Unsupported`] there.
-//!
+//! One mechanism per platform: FUSE on Linux, NFS on macOS, cfapi on Windows.
 //! Every backend is compiled only for its own platform *and* gated behind a
-//! cargo feature. Because cargo cannot express per-OS defaults, `fuse` and
-//! `cfapi` are both on by default and simply compile to nothing off-platform;
-//! the dependencies themselves live under `[target.'cfg(...)'.dependencies]`,
-//! so a Linux build never fetches the `windows` crate and vice versa.
+//! cargo feature. Because cargo cannot express per-OS defaults, `fuse`, `nfs`
+//! and `cfapi` are all on by default and simply compile to nothing
+//! off-platform; the dependencies themselves live under
+//! `[target.'cfg(...)'.dependencies]`, so a Linux build never fetches the
+//! `windows` crate and vice versa.
+//!
+//! # What a backend supplies
+//!
+//! Three things, and nothing else:
+//!
+//! 1. A `mount(builder, fs)` function returning a handle.
+//! 2. That handle's [`Mounted`] impl, which owns teardown.
+//! 3. A [`preflight::Caps`] describing which [`MountBuilder`] options it can
+//!    honor.
+//!
+//! Everything else shared lives in [`preflight`] (option validation and
+//! mountpoint checks), [`readdir`] (the `.`/`..` listing driver) and here
+//! (unmount-on-drop). A new backend adds one arm to [`mount`] and one to
+//! [`auto_mount`], not a variant threaded through several `match`es.
 
 use crate::error::{FsError, Result};
 use crate::fs::ReadOnlyFs;
@@ -21,60 +32,73 @@ pub(crate) mod fuse;
 #[cfg(all(target_os = "macos", feature = "nfs"))]
 pub(crate) mod nfs;
 
-pub(crate) mod readdir_cookie;
+// Dead when every backend is cfg'd or featured out — the only configuration
+// in which nothing supplies a `Caps` — so the allow is scoped to exactly that
+// build rather than blanketed on.
+#[cfg_attr(
+    not(any(
+        all(target_os = "linux", feature = "fuse"),
+        all(target_os = "macos", feature = "nfs"),
+        all(windows, feature = "cfapi"),
+    )),
+    allow(dead_code)
+)]
+pub(crate) mod preflight;
+pub(crate) mod readdir;
+#[macro_use]
+pub(crate) mod trace;
 
 #[cfg(all(windows, feature = "cfapi"))]
 pub(crate) mod cfapi;
 
-/// Backend-specific live-mount state.
-pub(crate) enum MountHandle {
-    #[cfg(all(target_os = "linux", feature = "fuse"))]
-    Fuse(fuse::FuseHandle),
-    #[cfg(all(target_os = "macos", feature = "nfs"))]
-    Nfs(nfs::NfsHandle),
-    #[cfg(all(windows, feature = "cfapi"))]
-    CfApi(cfapi::CfApiHandle),
-    /// Keeps the enum inhabited when every backend is cfg'd or featured out.
-    #[allow(dead_code)]
-    None,
-}
+/// A live mount, owned by whichever backend created it.
+///
+/// # Teardown contract
+///
+/// [`unmount`](Mounted::unmount) consumes the handle, so [`Mount`] can call it
+/// from both [`Mount::unmount`] and its `Drop` and have it run exactly once.
+/// Implementors therefore need no idempotence flag and no `Drop` of their own —
+/// unmount-on-drop is a guarantee this crate makes uniformly rather than one
+/// each backend re-derives from whatever its underlying library happens to do.
+///
+/// An implementation must leave nothing behind that would outlive the process:
+/// no serving thread still running, no registration still held. Joining a
+/// worker is part of teardown, not something left to the runtime.
+pub(crate) trait Mounted: Send + Sync + std::fmt::Debug {
+    /// Tear the mount down, surfacing whatever `drop` would have to swallow.
+    fn unmount(self: Box<Self>) -> Result<()>;
 
-impl MountHandle {
-    pub(crate) fn unmount(self) -> Result<()> {
-        match self {
-            #[cfg(all(target_os = "linux", feature = "fuse"))]
-            Self::Fuse(h) => h.unmount(),
-            #[cfg(all(target_os = "macos", feature = "nfs"))]
-            Self::Nfs(h) => h.unmount(),
-            #[cfg(all(windows, feature = "cfapi"))]
-            Self::CfApi(h) => h.unmount(),
-            Self::None => Ok(()),
-        }
-    }
+    /// Which mechanism this handle came from, for diagnostics.
+    fn backend(&self) -> Backend;
 }
 
 /// Resolve [`Backend::Auto`] and hand off to the chosen backend.
 pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<Mount> {
-    let requested = builder.backend;
     let mountpoint = builder.mountpoint.clone();
 
-    let inner = match requested {
+    let inner: Box<dyn Mounted> = match builder.backend {
         Backend::Auto => auto_mount(builder, fs)?,
 
         #[cfg(all(target_os = "linux", feature = "fuse"))]
-        Backend::Fuse => MountHandle::Fuse(fuse::mount(builder, fs)?),
+        Backend::Fuse => Box::new(fuse::mount(builder, fs)?),
 
         #[cfg(all(target_os = "macos", feature = "nfs"))]
-        Backend::Nfs => MountHandle::Nfs(nfs::mount(builder, fs)?),
+        Backend::Nfs => Box::new(nfs::mount(builder, fs)?),
 
         #[cfg(all(windows, feature = "cfapi"))]
-        Backend::CfApi => MountHandle::CfApi(cfapi::mount(builder, fs)?),
+        Backend::CfApi => Box::new(cfapi::mount(builder, fs)?),
 
         #[allow(unreachable_patterns)]
         other => return Err(unavailable(other)),
     };
 
-    Ok(Mount { inner, mountpoint })
+    trace::backend_info!(
+        "anymount: mounted {} with the {:?} backend",
+        mountpoint.display(),
+        inner.backend()
+    );
+
+    Ok(Mount::new(inner, mountpoint))
 }
 
 /// Pick the best backend for this platform.
@@ -86,20 +110,20 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<Mount
 /// macOS uses the NFSv3 backend, mounted with the OS's built-in `mount_nfs`
 /// client.
 #[allow(unused_variables, unused_mut)]
-fn auto_mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<MountHandle> {
+fn auto_mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<Box<dyn Mounted>> {
     #[cfg(all(target_os = "linux", feature = "fuse"))]
     {
-        return Ok(MountHandle::Fuse(fuse::mount(builder, fs)?));
+        return Ok(Box::new(fuse::mount(builder, fs)?));
     }
 
     #[cfg(all(target_os = "macos", feature = "nfs"))]
     {
-        return Ok(MountHandle::Nfs(nfs::mount(builder, fs)?));
+        return Ok(Box::new(nfs::mount(builder, fs)?));
     }
 
     #[cfg(all(windows, feature = "cfapi"))]
     {
-        return Ok(MountHandle::CfApi(cfapi::mount(builder, fs)?));
+        return Ok(Box::new(cfapi::mount(builder, fs)?));
     }
 
     #[allow(unreachable_code)]

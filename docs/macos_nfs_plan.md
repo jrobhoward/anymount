@@ -1,5 +1,13 @@
 # macOS NFSv3 backend for `anymount`
 
+> Historical. This is the plan the NFS backend was built from, kept for the
+> reasoning behind its wire-format and lifecycle decisions. Some names have
+> since moved: Phase 1.5 renamed `backend/readdir_cookie.rs` to
+> `backend/readdir.rs` and absorbed the `.`/`..` walk into it, replaced the
+> `MountHandle` enum with the `backend::Mounted` trait, and moved option
+> validation into `backend/preflight.rs`. See `docs/PLAN.md`'s Phase 1.5 for
+> what the tree looks like now.
+
 ## Context
 
 `anymount` mounts a read-only filesystem from user space on Linux (FUSE),

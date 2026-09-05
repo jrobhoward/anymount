@@ -35,6 +35,9 @@ tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
 proptest = "1"
+# Mountpoint-validation tests need a real directory and a real file. Already in
+# the graph as a `proptest` dependency, so naming it here adds no new crate.
+tempfile = "3"
 
 # Linux: no libfuse. `default-features = false` makes `fuser` mount via the
 # `fusermount3` binary, which keeps LGPL libfuse out of the link entirely and

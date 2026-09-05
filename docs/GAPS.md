@@ -260,3 +260,40 @@ is unmeasured, not verified safe.
 
 *To change:* use a constant-time comparison (e.g. `subtle::ConstantTimeEq`) if
 this ever needs a stronger guarantee than "loopback-only."
+
+## `allow_other` and `auto_unmount` are FUSE-only
+
+Both are FUSE mount options. The NFS backend has no counterpart — the server
+binds to loopback and authorizes with the file-handle secret rather than by uid
+— and neither does cfapi, where a sync root belongs to the user running the
+process. `backend/preflight.rs` rejects a request for either on a backend whose
+`Caps` does not claim it, naming the backend, rather than accepting the call and
+quietly doing nothing.
+
+*To change:* nothing to change for `auto_unmount` — dropping the `Mount`
+unmounts on every backend, which is what it was for. Exposing an NFS mount to
+other users would mean real per-user authorization in place of the handle
+secret, which `docs/PLAN.md`'s Phase 0.6 deliberately rejected.
+
+## `..` reports the directory's own inode when `lookup(dir, "..")` is unanswered
+
+`backend/readdir.rs`'s `emit` resolves `..`'s inode with `lookup(dir, "..")` and
+falls back to the directory itself when that fails. `ReadOnlyFs`'s docs ask
+implementors to answer `.` and `..`, but treat it as a should: an implementation
+that does not still gets a usable listing, with a cosmetically wrong `..`
+fileid, rather than a failed `readdir`. Under FUSE the kernel resolves `..` from
+its own dentry cache regardless, so only tools reading `d_ino` straight out of
+`getdents` — `find -inum`, say — can observe it.
+
+*To change:* answer `lookup(dir, "..")`. `examples/memfs.rs` shows the shape.
+
+## `tracing` covers lifecycle and discarded errors, not every operation
+
+The `tracing` feature wires `backend/trace.rs` into the places an error would
+otherwise be dropped silently — a failed `ReadOnlyFs::release`, a failed unmount
+during `drop` — and to mount and unmount themselves. It is not the
+per-operation span coverage a profiler would want.
+
+*To change:* instrument each adapter callback in `backend/fuse.rs` and each
+procedure in `backend/nfs/nfs_proto.rs`. Worth doing when someone is actually
+debugging a latency problem through the trait.

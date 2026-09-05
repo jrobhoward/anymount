@@ -2,117 +2,116 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
-//! The `readdir` cookie arithmetic is the one part of the FUSE adapter with
-//! real invariants worth checking beyond a handful of examples: cookies must
-//! round-trip back to the trait offset they came from, and a listing spread
-//! across many buffer-limited kernel calls must reassemble into exactly one
-//! `.`, one `..`, then every trait entry in order with nothing skipped or
-//! repeated. `super::cookie` is tested directly, with no `fuser` session
-//! involved.
+//! What is testable here without a live kernel session: the pure translation
+//! functions between this crate's types and `fuser`'s, and FUSE's `getxattr`
+//! size-query convention.
+//!
+//! The `readdir` cookie and pagination properties used to live here as a
+//! hand-written simulation of `FuseAdapter::readdir`. They now live in
+//! `backend/readdir_tests.rs` and drive `readdir::emit` — the code this
+//! adapter actually calls — instead of a copy of it.
 
-use proptest::prelude::*;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::cookie;
+use super::*;
 
-/// One simulated FUSE `readdir` call: mirrors `FuseAdapter::readdir`'s
-/// three-stage structure (`.`, `..`, then trait entries) against a
-/// buffer that accepts exactly `capacity` entries before reporting full,
-/// the same contract `ReplyDirectory::add` has (return `true` = not added,
-/// buffer full).
-struct Call {
-    added: Vec<String>,
-    /// `Some(cookie)` to resume from if the buffer filled before the listing
-    /// was exhausted; `None` once every entry has been served.
-    resume_at: Option<u64>,
+#[test]
+fn to_fuser_kind____each_variant____maps_to_the_matching_fuser_type() {
+    assert_eq!(to_fuser_kind(FileKind::File), fuser::FileType::RegularFile);
+    assert_eq!(
+        to_fuser_kind(FileKind::Directory),
+        fuser::FileType::Directory
+    );
 }
 
-fn one_call(offset: u64, total_entries: u64, capacity: usize) -> Call {
-    let mut added = Vec::new();
-    let mut remaining = capacity;
-    let mut next = offset;
-
-    if next == 0 {
-        if remaining == 0 {
-            return Call {
-                added,
-                resume_at: Some(0),
-            };
-        }
-        added.push(".".to_owned());
-        remaining -= 1;
-        next = cookie::DOT;
-    }
-    if next == cookie::DOT {
-        if remaining == 0 {
-            return Call {
-                added,
-                resume_at: Some(cookie::DOT),
-            };
-        }
-        added.push("..".to_owned());
-        remaining -= 1;
-        next = cookie::DOTDOT;
-    }
-
-    let mut i = cookie::trait_offset(next);
-    let mut last_added_cookie = None;
-    while i < total_entries && remaining > 0 {
-        added.push(format!("e{i}"));
-        last_added_cookie = Some(cookie::for_entry(i));
-        remaining -= 1;
-        i += 1;
-    }
-
-    let resume_at = if i >= total_entries {
-        None
-    } else {
-        Some(last_added_cookie.unwrap_or(next))
+#[test]
+fn to_fuser_attr____a_regular_file____carries_every_field_across() {
+    let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let attr = FileAttr {
+        ino: Ino(42),
+        kind: FileKind::File,
+        size: 1234,
+        perm: 0o644,
+        nlink: 3,
+        uid: 1000,
+        gid: 1001,
+        atime: UNIX_EPOCH + Duration::from_secs(10),
+        mtime,
+        ctime: UNIX_EPOCH + Duration::from_secs(20),
     };
-    Call { added, resume_at }
+
+    let out = to_fuser_attr(&attr);
+
+    assert_eq!(out.ino, INodeNo(42));
+    assert_eq!(out.size, 1234);
+    assert_eq!(out.perm, 0o644);
+    assert_eq!(out.nlink, 3);
+    assert_eq!(out.uid, 1000);
+    assert_eq!(out.gid, 1001);
+    assert_eq!(out.mtime, mtime);
+    assert_eq!(out.kind, fuser::FileType::RegularFile);
+    assert_eq!(out.rdev, 0);
+    assert_eq!(out.flags, 0);
+    assert_eq!(out.crtime, SystemTime::UNIX_EPOCH);
 }
 
-/// Drives [`one_call`] to completion the way the kernel would: resubmitting
-/// whatever cookie the previous call reported until the listing is
-/// exhausted, and concatenating everything served along the way.
-fn full_listing(total_entries: u64, capacity: usize) -> Vec<String> {
-    let mut collected = Vec::new();
-    let mut offset = 0u64;
-    loop {
-        let call = one_call(offset, total_entries, capacity);
-        collected.extend(call.added);
-        match call.resume_at {
-            Some(next) => offset = next,
-            None => return collected,
-        }
-    }
+#[test]
+fn to_fuser_attr____size_not_a_block_multiple____rounds_blocks_up() {
+    // `stat` reports allocated blocks, so a partial block still counts.
+    let one_byte = to_fuser_attr(&FileAttr::file(Ino(2), 1));
+    assert_eq!(one_byte.blocks, 1);
+
+    let exact = to_fuser_attr(&FileAttr::file(Ino(2), 512));
+    assert_eq!(exact.blocks, 1);
+
+    let over = to_fuser_attr(&FileAttr::file(Ino(2), 513));
+    assert_eq!(over.blocks, 2);
+
+    let empty = to_fuser_attr(&FileAttr::file(Ino(2), 0));
+    assert_eq!(empty.blocks, 0);
 }
 
-fn expected_listing(total_entries: u64) -> Vec<String> {
-    std::iter::once(".".to_owned())
-        .chain(std::iter::once("..".to_owned()))
-        .chain((0..total_entries).map(|i| format!("e{i}")))
-        .collect()
+#[test]
+fn errno____a_context_wrapped_error____keeps_the_inner_code() {
+    let plain = errno(&FsError::NotFound);
+    let wrapped = errno(&FsError::NotFound.context("while walking the archive"));
+    assert_eq!(plain, wrapped);
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+#[test]
+fn errno____read_only____is_erofs() {
+    assert_eq!(errno(&FsError::ReadOnly), Errno::from_i32(libc::EROFS));
+}
 
-    /// However small the per-call buffer is, a full multi-call listing
-    /// reassembles into exactly one `.`, one `..`, and every trait entry in
-    /// order — nothing skipped, nothing repeated, regardless of where the
-    /// buffer happens to fill.
-    #[test]
-    fn full_listing____any_buffer_capacity____matches_a_single_unbounded_call(
-        total_entries in 0u64..500,
-        capacity in 1usize..20,
-    ) {
-        prop_assert_eq!(full_listing(total_entries, capacity), expected_listing(total_entries));
-    }
+#[test]
+fn xattr_reply____size_zero____asks_for_the_length_only() {
+    assert_eq!(xattr_reply(17, 0), XattrReply::Size(17));
+    assert_eq!(xattr_reply(0, 0), XattrReply::Size(0));
+}
 
-    /// A buffer that never fills behaves like one unbounded call.
-    #[test]
-    fn full_listing____capacity_covers_everything____is_a_single_call(total_entries in 0u64..500) {
-        let capacity = total_entries as usize + 2;
-        prop_assert_eq!(full_listing(total_entries, capacity), expected_listing(total_entries));
-    }
+#[test]
+fn xattr_reply____buffer_large_enough____returns_the_value() {
+    assert_eq!(xattr_reply(17, 17), XattrReply::Data);
+    assert_eq!(xattr_reply(17, 64), XattrReply::Data);
+}
+
+#[test]
+fn xattr_reply____buffer_one_byte_short____is_rejected_not_truncated() {
+    assert_eq!(xattr_reply(17, 16), XattrReply::TooLarge);
+}
+
+#[test]
+fn read_buffer_len____an_ordinary_kernel_sized_request____is_not_capped() {
+    // The kernel negotiates its own ceiling, typically 128 KiB; MAX_READ only
+    // bounds how much a `size` field can make the adapter allocate.
+    assert_eq!(read_buffer_len(4096), 4096);
+    assert_eq!(read_buffer_len(128 * 1024), 128 * 1024);
+    assert_eq!(read_buffer_len(0), 0);
+}
+
+#[test]
+fn read_buffer_len____an_absurd_request____is_capped_rather_than_allocated() {
+    assert_eq!(read_buffer_len(u32::MAX), MAX_READ as usize);
+    assert_eq!(read_buffer_len(MAX_READ + 1), MAX_READ as usize);
+    assert_eq!(read_buffer_len(MAX_READ), MAX_READ as usize);
 }

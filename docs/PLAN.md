@@ -703,8 +703,9 @@ and property-tested), and `server.rs`/`mod.rs` (accept loop, per-connection
 dispatch, `mount_nfs` invocation, unmount ordering). The `.`/`..` convention
 the spike found is now documented on `ReadOnlyFs::lookup` (`src/fs.rs`) and
 fixed in `examples/memfs.rs`. The `readdir` cookie arithmetic that used to be
-private to `backend/fuse.rs` moved to `backend/readdir_cookie.rs`, unconditionally
-compiled and tested on every platform — doing so surfaced that one of its own
+private to `backend/fuse.rs` moved to `backend/readdir_cookie.rs` (renamed to
+`backend/readdir.rs` in Phase 1.5, which also moved the walk around it there),
+unconditionally compiled and tested on every platform — doing so surfaced that one of its own
 property tests asserted the wrong invariant (`trait_offset(for_entry(x)) ==
 x`, when the real resume-after-a-cookie semantics require `x + 1`); the
 `readdir`/`for_entry`/`trait_offset` implementation itself was already
@@ -829,6 +830,64 @@ Consequences worth recording:
   second, differently-named optional dependency) — not a reversion to the
   shared `any(linux, macos)` gating this phase removed.
 
+### Phase 1.5 — consolidate the backend seams
+
+**Done.**
+
+The FUSE and NFS backends were built far apart and had never been reconciled.
+Both worked, but they answered the same questions differently, and each
+difference would have become a three-way inconsistency once cfapi landed. This
+phase removed the divergences by giving the shared behaviour one home, and
+brought the FUSE backend to the standard the NFS work set.
+
+What diverged, and what it is now:
+
+| Concern | Before | Now |
+|---|---|---|
+| Teardown | FUSE relied on `fuser::Mount`'s `Drop`, which unmounts but leaves the serving thread detached; NFS had its own `Drop` plus an idempotence flag | `backend::Mounted`, whose `unmount` consumes the handle. `Mount` calls it from `unmount()` and from its own `Drop`, so it runs exactly once and FUSE now joins its thread |
+| Dispatch | a `MountHandle` enum with one cfg'd variant, one cfg'd `unmount` arm and one `auto_mount` block per backend | `Box<dyn Mounted>`. The enum is gone; a backend contributes one arm to `mount` and one to `auto_mount` |
+| `..` in `readdir` | FUSE reported the directory's own inode; NFS resolved the parent with `lookup(dir, "..")` and failed the whole call if that failed | `backend::readdir::emit`, shared. `lookup(dir, "..")` best-effort, falling back to the directory itself — `fs.rs` documents answering `..` as a should, not a must |
+| Listing pagination | the cookie arithmetic was shared, but the walk around it was written twice | one `emit`, parameterised by a `Sink` closure. Only "does this entry fit?" is backend-specific |
+| Unsupported builder options | FUSE rejected `auto_unmount` without `allow_other`; NFS silently ignored both | `backend::preflight`: each backend declares a `Caps`, and a request it cannot honor is an error naming the backend |
+| Mountpoint validation | none; each platform surfaced its helper binary's own message | `preflight::check` — exists, and is a directory — before any platform code runs |
+| Read allocation | FUSE allocated whatever `size` asked for; NFS capped at `RTMAX` | FUSE caps at `MAX_READ` too |
+| `tracing` feature | declared in `Cargo.toml`, referenced by no code, so `fs.rs`'s "errors are logged, not propagated" was not true | `backend/trace.rs`, used where an error is deliberately discarded |
+
+Two things worth recording beyond the table:
+
+- **The `readdir` property tests were testing a copy of the code.**
+  `backend/fuse_tests.rs` held a hand-written `one_call`/`full_listing`
+  simulation of `FuseAdapter::readdir`'s three-stage structure, so 512 cases
+  per property exercised a mirror of the algorithm rather than the algorithm.
+  Extracting `emit` made the production code drivable from a test; the
+  properties now live in `backend/readdir_tests.rs` and call it directly, with
+  a second pair covering `Dots::Omit`, the shape cfapi will use. What stayed in
+  `fuse_tests.rs` became real unit tests over the FUSE-specific pure functions
+  (`to_fuser_attr`, `to_fuser_kind`, `xattr_reply`, `read_buffer_len`, the
+  `FsError` → `Errno` mapping). Lib tests went from 17 to 41.
+- **`cargo check --target aarch64-apple-darwin` was too weak a cross-check.**
+  Without `--all-targets` it does not compile the `*_tests.rs` files, so a
+  macOS-gated test referring to a renamed item passes locally and fails on the
+  runner. This was hit during this phase (`nfs_proto_tests.rs` still named
+  `readdir_cookie`). `CLAUDE.md` and CI's `cross-check` job now pass
+  `--all-targets`; CI also lints `--features tracing` and
+  `--no-default-features`, neither of which any job compiled before.
+
+Verified on Linux with real tools, not process output: `mount` reports
+`ro,nosuid,nodev,user_id=1000`, `ls -lR`, `cat`, `find`, `stat`, `dd skip=10
+count=12`, and a `sha256sum` through the mount matching one computed
+independently; `stat -c %i <mnt>/subdir/..` now reports the root's inode where
+it previously reported `subdir`'s own; a `Mount` dropped without calling
+`unmount()` tears down and leaves no stale entry in `mount`; and mounting at a
+nonexistent path or at a regular file fails with the new message instead of a
+raw `fusermount3` string. macOS and Windows are cross-compile-checked only —
+CI's `nfs-mount-smoke-test` remains the real verdict for the NFS changes.
+
+What this leaves for Phase 2: the cfapi backend supplies a `mount` function, a
+`Mounted` impl, and a `Caps`. Enumeration reuses `readdir::emit` with
+`Dots::Omit` and a sink that always accepts, since cfapi's
+`FETCH_PLACEHOLDERS` callback carries no size budget (Phase 2 spike item 3).
+
 ### Phase 2 — Windows backend
 
 **Current state:** `src/backend/cfapi.rs`'s `mount()` is a hard stub — it
@@ -926,7 +985,12 @@ before committing to `backend/nfs.rs`'s design.
    after a crash is a clean re-register, not a stale-state cleanup problem.**
    This closes Phase 2's spike list; all four items now have real answers.
 
-Once 1–4 have real answers: build `CfApiHandle`/`mount()` for real against the
+All four have real answers, and Phase 1.5 has since removed most of the
+non-cfapi work this phase would otherwise carry: `CfApiHandle` implements
+`backend::Mounted` (teardown, and unmount-on-drop, come from `Mount`), a
+`Caps` covers option validation and the mountpoint check, and directory
+enumeration reuses `backend::readdir::emit` with `Dots::Omit`. What remains is
+cfapi-specific: build `CfApiHandle`/`mount()` for real against the
 `windows` crate directly — `PopulationType::Partial` for on-demand
 enumeration, `STREAMING_ALLOWED` to avoid persisting fetched data,
 `AUTO_DEHYDRATION_ALLOWED` for reclamation — and verify with the same bar
@@ -958,7 +1022,7 @@ A `CaskFs` implementing `ReadOnlyFs`:
 | `fuse` | yes | FUSE backend (Linux only). Dependency is `cfg(target_os = "linux")`-scoped |
 | `nfs` | yes | NFS backend (macOS only). Hand-rolled RPC/XDR over `std::net`, no new dependency — `libc::arc4random_buf`/`libc::unmount` (already a macOS target dependency) cover the secret and clean teardown |
 | `cfapi` | yes | Cloud Files backend (Windows only). Dependency is `cfg(windows)`-scoped |
-| `tracing` | no | Per-operation spans |
+| `tracing` | no | Lifecycle and discarded-error logging via `backend/trace.rs`. Not yet per-operation spans |
 
 Cargo cannot express per-OS defaults, so `fuse`, `nfs` and `cfapi` all ship in
 `default` and compile to nothing off-platform; because the `fuse`/`cfapi`

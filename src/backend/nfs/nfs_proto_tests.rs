@@ -276,9 +276,9 @@ fn full_listing_via_paging(fs: &TestFs, handle: &FileHandle3, maxcount: u32) -> 
             panic!("readdir made no progress with maxcount={maxcount}");
         }
         cookie = match collected.len() {
-            1 => readdir_cookie::DOT,
-            2 => readdir_cookie::DOTDOT,
-            n => readdir_cookie::for_entry((n - 2) as u64 - 1),
+            1 => readdir::DOT,
+            2 => readdir::DOTDOT,
+            n => readdir::for_entry((n - 2) as u64 - 1),
         };
         let _ = last_name;
     }
