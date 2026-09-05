@@ -693,6 +693,40 @@ targeted spike than the WebDAV one and covers less ground. Before
   if the server dies *unexpectedly* while still mounted (a panic, a crash),
   which no amount of clean-shutdown ordering can prevent outright.
 
+**Done.** `backend/nfs/` is built for real: `xdr.rs`/`rpc.rs` (bounds-checked
+XDR primitives and ONC RPC envelope), `mount_proto.rs` (MOUNT, RFC 1813
+Appendix I), `nfs_proto.rs` (NFS v3, RFC 1813 §3 — `GETATTR`/`LOOKUP`/
+`ACCESS`/`READ`/`READDIR(PLUS)`/`FSSTAT`/`FSINFO`/`PATHCONF`, plus a clean
+`NFS3ERR_ROFS`/`NFS3ERR_NOTSUPP` rejection table for every mutating
+procedure), `handle.rs` (the secret-in-handle scheme from the spike, unit-
+and property-tested), and `server.rs`/`mod.rs` (accept loop, per-connection
+dispatch, `mount_nfs` invocation, unmount ordering). The `.`/`..` convention
+the spike found is now documented on `ReadOnlyFs::lookup` (`src/fs.rs`) and
+fixed in `examples/memfs.rs`. The `readdir` cookie arithmetic that used to be
+private to `backend/fuse.rs` moved to `backend/readdir_cookie.rs`, unconditionally
+compiled and tested on every platform — doing so surfaced that one of its own
+property tests asserted the wrong invariant (`trait_offset(for_entry(x)) ==
+x`, when the real resume-after-a-cookie semantics require `x + 1`); the
+`readdir`/`for_entry`/`trait_offset` implementation itself was already
+correct, confirmed by hand-tracing the existing multi-call pagination
+simulation, so only the test's assertion needed fixing.
+
+Verified end to end on this machine, real tools throughout: `mount_nfs`
+mounts unprivileged (`probe`/`memfs`), `mount` reports type `nfs`, `ls -lR`/
+`cat`/`stat`/`find` all work, `cd subdir && ls ..` exercises `..` navigation,
+a `shasum -a 256` through the mount matches one computed independently,
+`nfsstat -m` confirms `soft,timeo=20,retrans=2` took effect, unmounting
+(both `Mount::unmount()` and a manual `umount`) leaves no stale `mount`
+entry, and `kill -9`-ing the server mid-mount produces a clean `Operation
+timed out` in ~7 seconds rather than a hang or a system dialog. Paginated
+`READDIRPLUS3` listings (a client budget too small to fit even one entry,
+one large enough for the whole directory, and everything in between) are
+covered by a property test rather than a single manual large-directory run.
+Deferred to `docs/GAPS.md`: a per-inode handle cache (v1 pays an open/release
+round trip per `READ3`), `onc-rpc` as an alternative to the hand-rolled RPC
+envelope, and the unmeasured constant-time posture of the handle secret
+comparison.
+
 ### Phase 1 — harden the trait
 
 **Done.**
@@ -922,23 +956,21 @@ A `CaskFs` implementing `ReadOnlyFs`:
 | Feature | Default | Effect |
 |---|---|---|
 | `fuse` | yes | FUSE backend (Linux only). Dependency is `cfg(target_os = "linux")`-scoped |
-| `nfs` | — | NFS backend (macOS only). Not implemented yet — no such feature or dependency exists in `Cargo.toml` today; `backend/nfs.rs` is still just the Phase 0.6 spike, not in the tree |
+| `nfs` | yes | NFS backend (macOS only). Hand-rolled RPC/XDR over `std::net`, no new dependency — `libc::arc4random_buf`/`libc::unmount` (already a macOS target dependency) cover the secret and clean teardown |
 | `cfapi` | yes | Cloud Files backend (Windows only). Dependency is `cfg(windows)`-scoped |
 | `tracing` | no | Per-operation spans |
 
-Cargo cannot express per-OS defaults, so `fuse` and `cfapi` both ship in
-`default` and compile to nothing off-platform; because the dependencies live
-under `[target.'cfg(...)'.dependencies]`, a Linux build never fetches
-`windows`, and neither a Linux nor a Windows build fetches whatever RPC/XDR
-crate a real `nfs` feature will eventually need on macOS.
+Cargo cannot express per-OS defaults, so `fuse`, `nfs` and `cfapi` all ship in
+`default` and compile to nothing off-platform; because the `fuse`/`cfapi`
+dependencies live under `[target.'cfg(...)'.dependencies]`, a Linux build
+never fetches `windows`, and `nfs` needs no dependency of its own at all.
 
 `fuse` narrowing from `cfg(unix)` (Linux and macOS both) to `cfg(target_os =
 "linux")` only is **done** (Phase 1) — see that phase's notes for what broke
-locally before this landed and why. `nfs` for macOS is not: this table
-describes the target shape for when `backend/nfs.rs` is built, not current
-state. Until then, macOS compiles with no mount backend at all, and
-mounting there returns `FsError::Unsupported`. (An earlier version of this
-plan named the macOS feature `webdav`; superseded by the NFS decision above.)
+locally before this landed and why. `nfs` for macOS is now built for real
+(Phase 0.6, closed below) — `backend/nfs/` in the tree, not the spike. (An
+earlier version of this plan named the macOS feature `webdav`; superseded by
+the NFS decision above.)
 
 Deliberately absent: any `winfsp`, `projfs`, or `async` feature.
 

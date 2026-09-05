@@ -18,6 +18,7 @@ use fuser::{
     ReplyStatfs, ReplyXattr, Request, SessionACL,
 };
 
+use crate::backend::readdir_cookie as cookie;
 use crate::error::{FsError, Result};
 use crate::fs::ReadOnlyFs;
 use crate::mount::MountBuilder;
@@ -234,30 +235,6 @@ impl<F: ReadOnlyFs> fuser::Filesystem for FuseAdapter<F> {
             Ok(value) => reply_xattr(&value, size, reply),
             Err(e) => reply.error(errno(&e)),
         }
-    }
-}
-
-/// Cookie encoding for FUSE `readdir` replies, kept as pure functions so the
-/// resume arithmetic can be property-tested without a live session.
-///
-/// `.` occupies cookie 1 and `..` cookie 2; the trait's own entry at (0-based)
-/// offset `o` — from `fs.readdir(ino, o)` — occupies cookie `o + 3`. A resume
-/// request's `offset` is the cookie of the last entry the kernel accepted, so
-/// [`trait_offset`] and [`for_entry`] are inverses of each other for any
-/// cookie `>= DOTDOT`.
-mod cookie {
-    pub(super) const DOT: u64 = 1;
-    pub(super) const DOTDOT: u64 = 2;
-
-    /// Trait-level offset to resume `fs.readdir` from, given the cookie the
-    /// kernel is resuming after (`0` on a fresh `readdir`).
-    pub(super) fn trait_offset(resume_after: u64) -> u64 {
-        resume_after.saturating_sub(DOTDOT)
-    }
-
-    /// Cookie for the trait's entry at `trait_offset`.
-    pub(super) fn for_entry(trait_offset: u64) -> u64 {
-        trait_offset + DOTDOT + 1
     }
 }
 

@@ -36,9 +36,8 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y fuse3
 
-      # macOS has no backend in the tree yet — the decided mechanism is NFS,
-      # not FUSE (docs/PLAN.md) — so nothing platform-specific to install
-      # here; this job only proves the platform-independent parts build.
+      # macOS mounts through the built-in `mount_nfs` client, so nothing
+      # platform-specific needs installing here either.
       - run: cargo build --all-targets
       - run: cargo test
       - run: cargo clippy --all-targets -- -Dwarnings
@@ -76,6 +75,34 @@ jobs:
           wait
           ! mount | grep -qF /tmp/anymount-ci
 
+  # macOS is the other runner that can complete a real mount unattended: the
+  # NFS backend needs no kext approval, unlike the FUSE fallback.
+  nfs-mount-smoke-test:
+    name: nfs mount smoke test / macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Mount memfs over NFS and verify contents
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/anymount-nfs-ci
+          cargo build --example memfs
+          ( sleep 25 ) | cargo run -q --example memfs -- /tmp/anymount-nfs-ci &
+          sleep 5
+          mount | grep -F /tmp/anymount-nfs-ci
+          test "$(cat /tmp/anymount-nfs-ci/hello.txt)" = "Hello from anymount!"
+          # Compare a digest taken through the mount against one computed directly.
+          # `shasum -a 256`, not `sha256sum`: the latter is not a default macOS binary.
+          got=$(shasum -a 256 /tmp/anymount-nfs-ci/numbers.txt | cut -d' ' -f1)
+          want=$(seq 1 100 | shasum -a 256 | cut -d' ' -f1)
+          test "$got" = "$want"
+          test "$(cat /tmp/anymount-nfs-ci/subdir/nested.txt)" = "I am nested."
+          # Exercises `..`-driven navigation and LOOKUP correctness end to end.
+          find /tmp/anymount-nfs-ci | sort
+          wait
+          ! mount | grep -qF /tmp/anymount-nfs-ci
+
   cross-check:
     name: cross-compile check
     runs-on: ubuntu-latest
@@ -89,11 +116,9 @@ jobs:
       - name: Check Windows backend
         run: cargo check --target x86_64-pc-windows-msvc
 
-      # macOS has no backend in the tree yet (decided mechanism is NFS, not
-      # FUSE — docs/PLAN.md), so there is no macOS-specific code to miss here;
-      # this only catches platform-independent breakage early. Revisit once
-      # `backend/nfs.rs` exists — it will need its own real macOS runner the
-      # same way the FUSE backend needs macos-latest today.
+      # `check` alone proves the macOS-specific code (backend/nfs/) still
+      # type-checks; `nfs-mount-smoke-test` above is what actually runs it,
+      # on a real macos-latest runner.
       - name: Check macOS
         run: cargo check --target aarch64-apple-darwin
 

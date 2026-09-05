@@ -6,7 +6,7 @@
 //! | OS | Mechanism | Notes |
 //! |----|-----------|-------|
 //! | Linux | FUSE via `fusermount3` | unprivileged; libfuse never linked |
-//! | macOS | none yet | decided: NFS, not FUSE — not built as `backend/nfs.rs` yet; see `docs/PLAN.md` |
+//! | macOS | NFSv3 via the built-in `mount_nfs` client | unprivileged; no macFUSE, no kernel extension |
 //! | Windows | Cloud Files (cfapi) | projects into a directory, not a drive letter |
 //!
 //! # Licensing
@@ -58,7 +58,9 @@ pub use types::{DirEntry, FileAttr, FileHandle, FileKind, Ino, ROOT_INO, StatFs}
 pub mod probe {
     /// Is a usable backend compiled in for this platform?
     pub fn any_backend_available() -> bool {
-        cfg!(all(target_os = "linux", feature = "fuse")) || cfg!(all(windows, feature = "cfapi"))
+        cfg!(all(target_os = "linux", feature = "fuse"))
+            || cfg!(all(target_os = "macos", feature = "nfs"))
+            || cfg!(all(windows, feature = "cfapi"))
     }
 
     #[cfg(all(windows, feature = "cfapi"))]

@@ -41,6 +41,18 @@ use crate::types::{DirEntry, FileAttr, FileHandle, Ino, StatFs};
 /// hook to evict entries the kernel no longer references. cfapi has no
 /// equivalent notification, so `forget` is never called on Windows.
 ///
+/// # `.` and `..`
+///
+/// FUSE's kernel client never sends these names to [`lookup`](Self::lookup);
+/// it resolves them from its own dentry cache. NFS clients have no such
+/// cache and issue real wire `LOOKUP` calls for both. Implementations
+/// intended to work under the NFS backend should answer
+/// `lookup(dir, ".")` with `dir`'s own attributes and `lookup(dir, "..")`
+/// with the parent's, the way `examples/memfs.rs` does.
+/// [`readdir`](Self::readdir) must still never return either — the backend
+/// synthesizes them, obtaining `..`'s target [`Ino`] the same way, via
+/// `lookup(dir, "..")`.
+///
 /// # Handle lifetime
 ///
 /// [`open`](Self::open) may be called more than once for the same `ino`,

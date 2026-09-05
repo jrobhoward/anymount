@@ -15,6 +15,8 @@ pub enum Backend {
     Auto,
     /// FUSE, via `fusermount3`. Linux only.
     Fuse,
+    /// NFSv3 via the built-in `mount_nfs` client. macOS only.
+    Nfs,
     /// Windows Cloud Files API.
     CfApi,
 }

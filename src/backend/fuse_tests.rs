@@ -14,36 +14,6 @@ use proptest::prelude::*;
 
 use super::cookie;
 
-#[test]
-fn trait_offset____resume_after_zero_or_dot____is_the_first_entry() {
-    assert_eq!(cookie::trait_offset(0), 0);
-    assert_eq!(cookie::trait_offset(cookie::DOT), 0);
-    assert_eq!(cookie::trait_offset(cookie::DOTDOT), 0);
-}
-
-#[test]
-fn for_entry____first_trait_offset____is_never_a_dot_or_dotdot_cookie() {
-    assert!(cookie::for_entry(0) > cookie::DOTDOT);
-}
-
-proptest! {
-    #[test]
-    fn for_entry____any_offset____round_trips_through_trait_offset(offset in 0u64..1_000_000) {
-        prop_assert_eq!(cookie::trait_offset(cookie::for_entry(offset)), offset);
-    }
-
-    #[test]
-    fn for_entry____distinct_offsets____never_collide(a in 0u64..10_000, b in 0u64..10_000) {
-        prop_assume!(a != b);
-        prop_assert_ne!(cookie::for_entry(a), cookie::for_entry(b));
-    }
-
-    #[test]
-    fn for_entry____any_offset____cookie_exceeds_dot_and_dotdot(offset in 0u64..1_000_000) {
-        prop_assert!(cookie::for_entry(offset) > cookie::DOTDOT);
-    }
-}
-
 /// One simulated FUSE `readdir` call: mirrors `FuseAdapter::readdir`'s
 /// three-stage structure (`.`, `..`, then trait entries) against a
 /// buffer that accepts exactly `capacity` entries before reporting full,

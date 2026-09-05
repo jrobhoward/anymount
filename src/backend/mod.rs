@@ -18,6 +18,11 @@ use crate::mount::{Backend, Mount, MountBuilder};
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 pub(crate) mod fuse;
 
+#[cfg(all(target_os = "macos", feature = "nfs"))]
+pub(crate) mod nfs;
+
+pub(crate) mod readdir_cookie;
+
 #[cfg(all(windows, feature = "cfapi"))]
 pub(crate) mod cfapi;
 
@@ -25,6 +30,8 @@ pub(crate) mod cfapi;
 pub(crate) enum MountHandle {
     #[cfg(all(target_os = "linux", feature = "fuse"))]
     Fuse(fuse::FuseHandle),
+    #[cfg(all(target_os = "macos", feature = "nfs"))]
+    Nfs(nfs::NfsHandle),
     #[cfg(all(windows, feature = "cfapi"))]
     CfApi(cfapi::CfApiHandle),
     /// Keeps the enum inhabited when every backend is cfg'd or featured out.
@@ -37,6 +44,8 @@ impl MountHandle {
         match self {
             #[cfg(all(target_os = "linux", feature = "fuse"))]
             Self::Fuse(h) => h.unmount(),
+            #[cfg(all(target_os = "macos", feature = "nfs"))]
+            Self::Nfs(h) => h.unmount(),
             #[cfg(all(windows, feature = "cfapi"))]
             Self::CfApi(h) => h.unmount(),
             Self::None => Ok(()),
@@ -55,6 +64,9 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<Mount
         #[cfg(all(target_os = "linux", feature = "fuse"))]
         Backend::Fuse => MountHandle::Fuse(fuse::mount(builder, fs)?),
 
+        #[cfg(all(target_os = "macos", feature = "nfs"))]
+        Backend::Nfs => MountHandle::Nfs(nfs::mount(builder, fs)?),
+
         #[cfg(all(windows, feature = "cfapi"))]
         Backend::CfApi => MountHandle::CfApi(cfapi::mount(builder, fs)?),
 
@@ -71,11 +83,18 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<Mount
 /// without persisting data to disk, dehydrates automatically, and
 /// `CfRegisterSyncRoot` is confirmed to work unpackaged (Phase 0,
 /// `docs/PLAN.md`). ProjFS was evaluated and is not used — see `docs/GAPS.md`.
+/// macOS uses the NFSv3 backend, mounted with the OS's built-in `mount_nfs`
+/// client.
 #[allow(unused_variables, unused_mut)]
 fn auto_mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<MountHandle> {
     #[cfg(all(target_os = "linux", feature = "fuse"))]
     {
         return Ok(MountHandle::Fuse(fuse::mount(builder, fs)?));
+    }
+
+    #[cfg(all(target_os = "macos", feature = "nfs"))]
+    {
+        return Ok(MountHandle::Nfs(nfs::mount(builder, fs)?));
     }
 
     #[cfg(all(windows, feature = "cfapi"))]
@@ -86,8 +105,8 @@ fn auto_mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<MountHandle
     #[allow(unreachable_code)]
     Err(FsError::Unsupported(
         "no mount backend compiled in for this platform; \
-         enable the `fuse` feature on Linux or `cfapi` on Windows \
-         (macOS has no backend yet — see docs/PLAN.md)",
+         enable the `fuse` feature on Linux, `nfs` on macOS, or `cfapi` on \
+         Windows",
     ))
 }
 
@@ -96,6 +115,9 @@ fn unavailable(backend: Backend) -> FsError {
     match backend {
         Backend::Fuse => {
             FsError::Unsupported("the `fuse` backend requires Linux and the `fuse` feature")
+        }
+        Backend::Nfs => {
+            FsError::Unsupported("the `nfs` backend requires macOS and the `nfs` feature")
         }
         Backend::CfApi => {
             FsError::Unsupported("the `cfapi` backend requires Windows and the `cfapi` feature")

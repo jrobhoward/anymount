@@ -13,13 +13,17 @@ categories = ["filesystem", "os"]
 readme = "README.md"
 
 [features]
-default = ["fuse", "cfapi"]
+default = ["fuse", "cfapi", "nfs"]
 
 # FUSE via `fusermount3` (Linux only — macOS's decided backend is NFS, not
 # FUSE; see docs/PLAN.md). No libfuse to link, just the helper binary, so this
 # has no extra system requirement and is safe to default-enable everywhere
 # `cargo build`/`cargo test` might run. Inert (compiles to nothing) off Linux.
 fuse = ["dep:fuser"]
+# NFSv3 server via the built-in `mount_nfs` client (macOS only). Hand-rolled
+# RPC/XDR over std::net — no new dependency; `libc::arc4random_buf` (already a
+# macOS target dependency) supplies the per-mount secret. Inert off macOS.
+nfs = []
 # Windows Cloud Files (cfapi) backend. Inert off Windows.
 cfapi = ["dep:windows"]
 # Per-operation tracing spans.
@@ -39,9 +43,9 @@ proptest = "1"
 fuser = { version = "0.18", default-features = false, optional = true }
 libc = "0.2"
 
-# macOS has no backend yet — the decided one is NFS (docs/PLAN.md), not built
-# as `backend/nfs.rs` yet. `libc` is still needed here: `types.rs`'s
-# `current_uid`/`current_gid` are `cfg(unix)`, which covers macOS too.
+# macOS: the NFS backend needs `libc::arc4random_buf` and `libc::unmount` for
+# its file-handle secret and clean teardown; `types.rs`'s
+# `current_uid`/`current_gid` (cfg(unix)) also cover macOS.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 

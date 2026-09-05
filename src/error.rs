@@ -57,6 +57,27 @@ impl FsError {
         }
     }
 
+    /// `nfsstat3` for this error, used by the NFS backend.
+    ///
+    /// Named constants for the status codes live in
+    /// `backend::nfs::nfs_proto`, not repeated here as magic numbers.
+    #[cfg(all(target_os = "macos", feature = "nfs"))]
+    pub(crate) fn to_nfsstat3(&self) -> u32 {
+        match self {
+            Self::NotFound => 2,            // NFS3ERR_NOENT
+            Self::PermissionDenied => 13,   // NFS3ERR_ACCES
+            Self::NotADirectory => 20,      // NFS3ERR_NOTDIR
+            Self::IsADirectory => 21,       // NFS3ERR_ISDIR
+            Self::InvalidArgument => 22,    // NFS3ERR_INVAL
+            Self::NoXattr => 10_004,        // NFS3ERR_NOTSUPP
+            Self::ReadOnly => 30,           // NFS3ERR_ROFS
+            Self::Unsupported(_) => 10_004, // NFS3ERR_NOTSUPP
+            Self::Io(_) => 5,               // NFS3ERR_IO
+            Self::Other(_) => 10_006,       // NFS3ERR_SERVERFAULT
+            Self::Context { errno_as, .. } => errno_as.to_nfsstat3(),
+        }
+    }
+
     /// POSIX `errno` for this error, used by the FUSE backend.
     #[cfg(unix)]
     pub fn to_errno(&self) -> i32 {

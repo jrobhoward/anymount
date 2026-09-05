@@ -26,20 +26,20 @@ evaluated and cut entirely, not kept as a fallback — see
 
 ## Status
 
-**Phase 0 — spikes.** The FUSE backend works end to end on Linux. The Windows
-spike confirmed cfapi meets v1's needs unpackaged. macOS went through three
-mechanisms before landing on one: FUSE hit real Apple Silicon boot-security
-friction (see `docs/GAPS.md`); WebDAV avoided that but was found to make
-Finder download every file in a viewed folder; a from-scratch, unprivileged
-NFS server avoided both problems and is the current pick. Linux and Windows
-keep FUSE and cfapi respectively throughout. See [`docs/PLAN.md`](docs/PLAN.md)
-for the full history, why each earlier choice was set aside rather than just
-which one won, and what's left before NFS is a real backend (Phase 0.6).
+**Phase 0 — spikes**, with the FUSE and NFS backends now built and verified
+end to end. The Windows spike confirmed cfapi meets v1's needs unpackaged, but
+`mount()` there is still a stub. macOS went through three mechanisms before
+landing on one: FUSE hit real Apple Silicon boot-security friction (see
+`docs/GAPS.md`); WebDAV avoided that but was found to make Finder download
+every file in a viewed folder; a from-scratch, unprivileged NFS server avoided
+both problems and is what ships. See [`docs/PLAN.md`](docs/PLAN.md) for the
+full history and why each earlier choice was set aside rather than just which
+one won.
 
 | Backend | State |
 |---------|-------|
 | FUSE (Linux) | working — mounts, reads, random access, clean unmount |
-| NFS (macOS) | decided as the macOS backend, not implemented — a from-scratch NFSv3 server spike, running against `anymount::ReadOnlyFs` directly, has verified mounting (unprivileged, no macFUSE/kext/FSKit), access control, nested directories, cookie-based paging, real attribute mapping, and crashed-server recovery; surfaced a real gap where `examples/memfs.rs` would break under an NFS backend as-is (no `.`/`..` handling in `lookup()`); see `docs/PLAN.md`, Phase 0.6, for the full detail |
+| NFS (macOS) | working — a from-scratch NFSv3 server (`backend/nfs/`), mounted with the built-in `mount_nfs` client; verified unprivileged mounting, `ls`/`cat`/`stat`/`find`, `..` navigation, checksum-verified reads, paginated `READDIRPLUS3` listings, clean unmount, and crashed-server recovery (`soft,timeo=20,retrans=2`) |
 | cfapi | `probe()` implemented and confirmed working unpackaged; `mount()` is a stub |
 
 ## Why not just use an existing crate?
@@ -82,6 +82,7 @@ catalogued in [`docs/GAPS.md`](docs/GAPS.md).
 mkdir -p /tmp/anymount-demo
 cargo run --example probe                          # what can this machine mount?
 cargo run --example memfs -- /tmp/anymount-demo    # mount a small in-memory tree
+                                                    # (FUSE on Linux, NFS on macOS)
 ```
 
 Then, from another shell:

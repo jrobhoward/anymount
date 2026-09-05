@@ -31,10 +31,11 @@ fn main() {
         }
     }
 
-    // macOS has no backend in the tree yet — the decided mechanism is NFS,
-    // not FUSE (docs/PLAN.md) — so nothing to probe there today.
-    #[cfg(target_os = "macos")]
-    println!("\nno backend compiled in for macOS yet (decided: NFS; see docs/PLAN.md)");
+    // `mount_nfs` ships in /sbin on every Mac, so there is nothing to probe
+    // at runtime the way cfapi's platform-version check does — the NFS
+    // backend is available whenever it is compiled in.
+    #[cfg(all(target_os = "macos", feature = "nfs"))]
+    println!("\nNFS: backend compiled in (mounts via the built-in mount_nfs client)");
 
     #[cfg(all(windows, feature = "cfapi"))]
     {

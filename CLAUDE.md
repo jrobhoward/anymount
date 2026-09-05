@@ -11,12 +11,13 @@ Cloud Files API (cfapi) on Windows. One backend per platform, not a shared
 mechanism across platforms — see `docs/PLAN.md`'s "Revised decision" for why
 FUSE and WebDAV were both set aside on macOS in favor of NFS.
 
-**macOS has no backend built yet.** The decision is NFS (`docs/PLAN.md`), and
-the mechanism is spiked and proven there, but `backend/nfs.rs` does not exist
-in the tree — mounting on macOS currently compiles fine and returns
-`FsError::Unsupported` at mount time. There is no `fuse` module, feature, or
-`Backend` variant scoped to macOS; `fuse` is Linux-only. Do not reach for
-macFUSE as a stopgap without revisiting that decision first.
+**macOS mounts via a from-scratch NFSv3 server** (`backend/nfs/`), using the
+OS's built-in `mount_nfs` client — no macFUSE, no kernel extension, no root.
+See `docs/PLAN.md`'s Phase 0.6 for how that mechanism was chosen and proven,
+and the "Platform constraints" section below for what to know before editing
+it. There is no `fuse` module, feature, or `Backend` variant scoped to macOS;
+`fuse` is Linux-only. Do not reach for macFUSE as a stopgap without
+revisiting the NFS decision first.
 
 **Read-only is the scope, not a stage.** Write operations report `EROFS`.
 `docs/GAPS.md` lists every limitation and what changing it costs.
@@ -88,9 +89,12 @@ Single crate, edition 2024, `rust-version = 1.88.0`.
 - `mount.rs` — `MountBuilder` and `Mount`. `Mount` unmounts on drop;
   `Mount::unmount` surfaces the errors that drop swallows.
 - `backend/` — one module per OS mechanism, `cfg`-gated *and* feature-gated:
-  `fuse.rs` (Linux only), `cfapi.rs` (Windows). No `nfs.rs` yet — see "What
-  this is". `backend/mod.rs` resolves `Backend::Auto` and owns the
-  `MountHandle` enum.
+  `fuse.rs` (Linux only), `nfs/` (macOS only — a submodule tree: `mod.rs`,
+  `xdr.rs`, `rpc.rs`, `mount_proto.rs`, `nfs_proto.rs`, `handle.rs`,
+  `server.rs`), `cfapi.rs` (Windows). `readdir_cookie.rs` holds the `.`/`..`
+  cookie arithmetic shared by `fuse.rs` and `nfs/nfs_proto.rs`, compiled and
+  tested unconditionally rather than gated to either. `backend/mod.rs`
+  resolves `Backend::Auto` and owns the `MountHandle` enum.
 
 ### Why it looks like this
 
@@ -121,6 +125,33 @@ through.
 That keeps LGPL code out of the link and allows unprivileged mounts. Do not add
 `fuser`'s default features to the Linux target — that pulls in the libfuse
 link path, which this crate deliberately avoids everywhere it mounts via FUSE.
+
+**NFS authorizes with a secret embedded in the file handle, not `AUTH_SYS`.**
+`AUTH_SYS` trusts client-supplied uid/gid with no verification — confirmed
+worthless in the Phase 0.6 spike, where an unprivileged `mount_nfs` invocation
+claimed `uid=0 gid=0`. Instead, `FileHandle3` (`backend/nfs/handle.rs`)
+embeds a per-mount random 128-bit secret in every handle this server hands
+out, and the same secret is required as a literal path segment in `MNT`
+(`/export/<hex secret>`). Do not add real credential checking on top of this
+without revisiting `docs/PLAN.md`'s Phase 0.6 — it was a deliberate,
+tested-against-guessing choice, not an oversight.
+
+**NFS mounts `soft` with a short `timeo`/`retrans`, not classic NFS `hard`
+semantics.** A crashed server under `hard` semantics hangs every read
+indefinitely until a human dismisses macOS's own "Server connections
+interrupted" dialog — confirmed in the Phase 0.6 spike. `soft,timeo=20,
+retrans=2` (`backend/nfs/mod.rs`'s `mount_nfs` invocation) turns that into a
+bounded `Operation timed out` in a few seconds instead, since this crate's own
+server should answer over loopback with near-zero latency — a real slowdown
+almost certainly means the server crashed, not a transient hiccup worth
+waiting out. Do not remove these options to "fix" a slow mount; the fix
+belongs in the server, not in loosening the client's patience.
+
+**NFS's RPC framing supports only single-fragment messages.** `rpc.rs`'s
+`read_message` closes the connection on a multi-fragment ONC RPC message
+rather than reassembling one — every request the spike observed from
+`mount_nfs` fit in one fragment. See `docs/GAPS.md` if a client that needs
+reassembly ever shows up.
 
 ## Licensing is a design constraint
 

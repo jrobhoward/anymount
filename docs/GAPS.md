@@ -216,3 +216,47 @@ adapter. Worth doing only when an async consumer exists.
 
 The default `statfs` reports zeroed counters, so `df` shows an empty
 filesystem. Implementors that know their archive size should override it.
+
+## NFS: no per-inode handle cache — `READ3` pays an open/release round trip
+
+The NFS backend (`backend/nfs/`) calls `fs.open`/`read_at`/`release` on every
+`READ3` RPC rather than caching a handle per `Ino` across calls. This is
+correctness-complete — including for the sequential read bursts a real client
+issues — but pays one extra open/release round trip per read RPC. An
+idle-evicting handle cache keyed by `Ino` would remove that cost.
+
+*To change:* add a `Mutex<HashMap<Ino, (FileHandle, Instant)>>` (or similar) to
+`backend/nfs/mod.rs`'s per-mount state, with an eviction sweep on read
+staleness. Worth doing only once a real workload shows the round trip
+mattering; `ciphercask` (Phase 3) does not need it yet.
+
+## NFS: hand-rolled RPC framing, not the `onc-rpc` crate
+
+`backend/nfs/rpc.rs` hand-rolls ONC RPC (RFC 5531) record marking and
+call/reply headers rather than using the `onc-rpc` crate
+(`domodwyer/onc-rpc`, BSD-3-Clause, already on `deny.toml`'s allow-list).
+`onc-rpc` only covers that envelope layer, not the MOUNT/NFSv3 payload XDR
+(`fattr3`, `dirlistplus3`, and the rest), which needs hand-rolling regardless
+— so a partial dependency saves little. `onc-rpc` remains the option if the
+hand-rolled envelope ever needs replacing.
+
+## NFS: single-fragment RPC messages only
+
+`backend/nfs/rpc.rs`'s `read_message` closes the connection on a multi-fragment
+ONC RPC message rather than reassembling one from several TCP fragments. Every
+request `mount_nfs` sends in practice fits in one fragment; reassembly would
+only matter for an NFS client this crate has not been exercised against.
+
+*To change:* buffer fragments keyed by connection until the last-fragment bit
+is set, then dispatch the reassembled body.
+
+## NFS: file handle secret comparison is not constant-time
+
+`FileHandle3::resolve` (`backend/nfs/handle.rs`) compares the client-supplied
+16-byte secret with `==`, which is not constant-time. The timing side channel
+this could in principle leak has not been measured. A mount is bound to
+`127.0.0.1` only, which limits who could ever attempt this, but the posture
+is unmeasured, not verified safe.
+
+*To change:* use a constant-time comparison (e.g. `subtle::ConstantTimeEq`) if
+this ever needs a stronger guarantee than "loopback-only."

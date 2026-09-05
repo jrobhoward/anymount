@@ -35,6 +35,7 @@ enum Node {
 
 struct MemFs {
     nodes: HashMap<Ino, Node>,
+    parents: HashMap<Ino, Ino>,
     open_files: Mutex<HashMap<FileHandle, Ino>>,
     next_handle: AtomicU64,
 }
@@ -65,8 +66,13 @@ impl MemFs {
         root.insert(OsString::from("subdir"), Ino(4));
         nodes.insert(ROOT_INO, Node::Dir(root));
 
+        let mut parents = HashMap::new();
+        parents.insert(ROOT_INO, ROOT_INO);
+        parents.insert(Ino(4), ROOT_INO);
+
         Self {
             nodes,
+            parents,
             open_files: Mutex::new(HashMap::new()),
             next_handle: AtomicU64::new(1),
         }
@@ -86,6 +92,16 @@ impl MemFs {
 
 impl ReadOnlyFs for MemFs {
     fn lookup(&self, parent: Ino, name: &OsStr) -> Result<FileAttr> {
+        // FUSE's kernel client resolves `.`/`..` itself and never sends
+        // these names here; NFS has no such cache and issues real wire
+        // `LOOKUP` calls for both. See `ReadOnlyFs`'s "Inode lifetime" docs.
+        if name == OsStr::new(".") {
+            return self.attr(parent);
+        }
+        if name == OsStr::new("..") {
+            let p = *self.parents.get(&parent).ok_or(FsError::NotFound)?;
+            return self.attr(p);
+        }
         let Node::Dir(children) = self.node(parent)? else {
             return Err(FsError::NotADirectory);
         };
