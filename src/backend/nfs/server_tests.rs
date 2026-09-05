@@ -124,3 +124,54 @@ fn handle_message____an_unsupported_rpcvers____is_denied_rather_than_accepted() 
     assert_eq!(r.read_u32(), Some(1), "REPLY");
     assert_eq!(r.read_u32(), Some(1), "MSG_DENIED");
 }
+
+/// `serve_connection` relies on `SO_RCVTIMEO` to bound each read so the loop
+/// can check the stop flag between requests. On macOS and the BSDs `accept`
+/// inherits `O_NONBLOCK` from the listener (Linux does not), and a
+/// non-blocking socket ignores `SO_RCVTIMEO` entirely — so without an
+/// explicit `set_nonblocking(false)` the timeout is silently inert and each
+/// read fails with `EAGAIN` the moment it is called.
+///
+/// This pins the socket setup rather than the loop: after the same
+/// `set_nonblocking(false)` + `set_read_timeout` the worker does, a read on
+/// an idle connection must *wait* rather than fail instantly.
+#[test]
+fn serve_connection____accepted_socket____honours_the_read_timeout_rather_than_spinning() {
+    use std::io::Read;
+    use std::net::TcpStream as ClientStream;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    // The accept loop puts the listener in non-blocking mode; the flag is
+    // what gets inherited, so the test has to reproduce it.
+    listener.set_nonblocking(true).expect("set nonblocking");
+
+    let _client = ClientStream::connect(addr).expect("connect");
+
+    let mut accepted = None;
+    for _ in 0..100 {
+        if let Ok((stream, _)) = listener.accept() {
+            accepted = Some(stream);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut stream = accepted.expect("accept the client connection");
+
+    // Exactly what `serve_connection` does before its read loop.
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(ACCEPT_POLL_INTERVAL));
+
+    // The peer never sends anything, so this read can only time out.
+    let start = std::time::Instant::now();
+    let mut buf = [0u8; 4];
+    let result = stream.read(&mut buf);
+    let waited = start.elapsed();
+
+    assert!(result.is_err(), "an idle connection must not yield bytes");
+    assert!(
+        waited >= ACCEPT_POLL_INTERVAL / 2,
+        "read returned after {waited:?} instead of waiting ~{ACCEPT_POLL_INTERVAL:?}; \
+         the socket is still non-blocking, so the read timeout is inert"
+    );
+}

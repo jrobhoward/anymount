@@ -79,6 +79,14 @@ fn serve_connection<F: ReadOnlyFs>(
     handle: &Arc<FileHandle3>,
     stop: &Arc<AtomicBool>,
 ) {
+    // `accept` inherits the listener's `O_NONBLOCK` on macOS and the BSDs
+    // (Linux does not), and `SO_RCVTIMEO` is ignored on a non-blocking
+    // socket — both verified on macOS 26. Without this the read timeout
+    // below is silently inert: reads return `EAGAIN` immediately, and the
+    // loop's `WouldBlock` arm turns the intended 50ms wait into an
+    // unbounded retry. Clear the inherited flag so the timeout is real.
+    let _ = stream.set_nonblocking(false);
+
     // A blocking read with a timeout lets this worker also notice shutdown
     // without a dedicated cancellation mechanism per connection.
     let _ = stream.set_read_timeout(Some(ACCEPT_POLL_INTERVAL));
