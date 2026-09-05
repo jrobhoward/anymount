@@ -1,15 +1,13 @@
 # Known gaps
 
 What `anymount` does not do, why, and what it would take to change.
-Kept honest so downstream users hit no surprises.
 
 ## Read-only
 
 Write operations report `EROFS`. The first consumer serves immutable,
-already-captured content, so nothing in v1 needs writes. [ProjFS cannot intercept
-writes at all](https://github.com/microsoft/ProjFS-Managed-API/issues/30) —
-one of the reasons it was cut rather than kept as a fallback (see below) — so
-a cross-platform write story would have been uneven from the start anyway.
+already-captured content, so nothing in v1 needs writes. ProjFS cannot
+intercept writes at all, which was one reason it was cut (see below), so a
+cross-platform write story would have been uneven regardless.
 
 *To change:* add write ops to `ReadOnlyFs` (or a `ReadWriteFs` supertrait).
 cfapi has a real callback path for writes; Windows write support beyond that
@@ -43,32 +41,31 @@ it fetches the entire file on first touch, unconditionally, regardless of
 hydration policy, so it materialises whole files anyway. Only the FUSE path
 issues random reads.
 
-*To change:* the archive format must record plaintext chunk offsets. The trait
-does not change when it does.
+*To change:* the archive format must record plaintext chunk offsets. The
+trait does not change when it does.
 
 ## Windows: a directory, not a drive letter
 
 cfapi projects into a directory under a virtualisation root and cannot assign
 `X:`.
 
-*To change:* WinFsp is the only Windows option that mounts a real volume — and
-it is GPLv3 with a paid commercial license. It would have to live in a separate,
-opt-in `anymount-winfsp` crate so it never enters a default dependency graph.
+*To change:* WinFsp is the only Windows option that mounts a real volume, and
+it is GPLv3 with a paid commercial license. It would have to live in a
+separate, opt-in `anymount-winfsp` crate so it never enters a default
+dependency graph.
 
-## Windows: cfapi only — ProjFS was evaluated and cut, not deferred
+## Windows: cfapi only, not ProjFS
 
 `anymount` has exactly one Windows backend: cfapi. There is no `projfs`
 feature, no `Backend::ProjFs`, and no ProjFS code in the tree.
 
-This was a deliberate call, not an oversight or a placeholder for later.
-ProjFS was checked for a capability
-cfapi lacks and none was found for this crate's scope: ProjFS cannot intercept
-writes at all (moot for a read-only crate anyway), both backends hydrate
-through the same NTFS reparse-point/minifilter mechanism so `mmap` would not
-have been differentiated, and both fetch callbacks
-(`PrjGetFileDataCallback` / `CF_CALLBACK_TYPE_FETCH_DATA`) take an
-offset/length, so neither would have been uniquely capable of ranged reads.
-Meanwhile ProjFS carried two real costs cfapi doesn't:
+ProjFS was evaluated and found to offer nothing cfapi lacks for this crate's
+scope: ProjFS cannot intercept writes at all (moot for a read-only crate),
+both backends hydrate through the same NTFS reparse-point/minifilter
+mechanism so `mmap` would not have been differentiated, and both fetch
+callbacks (`PrjGetFileDataCallback` / `CF_CALLBACK_TYPE_FETCH_DATA`) take an
+offset/length, so neither is uniquely capable of ranged reads. ProjFS carried
+two costs cfapi doesn't:
 
 - Reading a file through ProjFS materialises it on local disk with no
   automatic eviction; browsing a large archive can fill the volume. cfapi's
@@ -79,15 +76,12 @@ Meanwhile ProjFS carried two real costs cfapi doesn't:
   cfapi needs none — `CldApi.dll` ships enabled on every Windows 10 1709+
   install, and `CfRegisterSyncRoot` works from an unpackaged binary.
 
-*To change:* this would mean re-adding a Windows backend from scratch, not
-restoring a stub — there is nothing here to un-comment. It would only be worth
-doing given a concrete environment where cfapi genuinely fails. If that
-happens, the constraint that made this hard the first time still applies:
-`ProjectedFSLib.dll` only exists once `Client-ProjFS` is enabled — off by
-default — so a load-time import of a `Prj*` symbol would prevent the *entire
-binary* from starting rather than yielding a catchable error. Any new ProjFS
-code must resolve entry points dynamically (`GetProcAddress` or
-delay-loading), never link them statically.
+*To change:* this would mean adding a Windows backend from scratch, not
+restoring a stub. If `ProjectedFSLib.dll` is ever used, its entry points must
+be resolved dynamically (`GetProcAddress` or delay-loading) rather than
+linked statically — `Client-ProjFS` is off by default, so a static import
+would prevent the whole binary from starting on a machine that hasn't enabled
+it.
 
 ## macOS: no FSKit backend
 
@@ -105,30 +99,20 @@ over FUSE/macFUSE.
 *To change:* retest once Apple ships a `fskitd` fix. Only relevant if NFS
 ever needs a fallback.
 
-## macOS: approving macFUSE's kernel extension requires lowering boot security (Apple Silicon)
+## macOS: FUSE needs a kernel extension, which Apple Silicon makes hard to approve
 
-Only applies to the FUSE fallback, not the decided NFS backend — the
-README's macOS row lists no install burden for the default path precisely
-because NFS avoids all of this. Relevant only when deliberately using the
-`fuse`/macFUSE path instead.
+Only applies to the FUSE fallback, not the shipped NFS backend. FUSE on
+macOS goes through macFUSE, which needs a third-party kernel extension. On
+Apple Silicon there is no click-through approval for that in System
+Settings; approving it means booting into Recovery Mode and lowering the
+machine's boot security policy — a standing change, not a one-time click.
 
-On Apple Silicon, there is no click-through approval for a third-party kernel
-extension in ordinary System Settings — no "Driver Extensions" row appears
-under Login Items & Extensions, and nothing appears under Privacy & Security
-either, even after `kernelmanagerd`/`syspolicyd` have logged an explicit
-`Kernel Extension BLOCKED: ... not approved to load. Please approve using
-System Settings` in response to a real mount attempt. The approval surface
-only exists after the machine is rebooted into Recovery Mode, Startup Security
-Utility is opened, and the boot security policy is lowered from "Full Security"
-to "Reduced Security" with "Allow user management of kernel extensions from
-identified developers" checked. That is a standing
-change to the machine's boot-time security posture, not scoped to this crate
-or reversible with a single click — worth deciding deliberately rather than
-doing as a side effect of setting up a dev environment.
+This is why the shipped macOS backend is NFS, not FUSE: using this crate
+should not require a security posture change, a reboot, or code signing as a
+prerequisite.
 
-*To change:* nothing to change in the crate. Document the real cost plainly
-(here, and to anyone setting up a macOS dev machine on the FUSE fallback)
-rather than downplay it.
+*To change:* nothing to change in the crate. This is inherent to third-party
+kernel extensions on Apple Silicon.
 
 ## No async
 
@@ -205,11 +189,7 @@ is set, then dispatch the reassembled body.
 `FileHandle3::resolve` (`backend/nfs/handle.rs`) compares the client-supplied
 16-byte secret with `==`, which is not constant-time. The timing side channel
 this could in principle leak has not been measured. A mount is bound to
-`127.0.0.1` only, which limits who could ever attempt this, but the posture
-is unmeasured, not verified safe.
-
-Still true at 1.0: this was reviewed before the 1.0 tag and left as is, on the
-same loopback-only reasoning above, not overlooked.
+`127.0.0.1` only, which limits who could attempt this.
 
 *To change:* use a constant-time comparison (e.g. `subtle::ConstantTimeEq`) if
 this ever needs a stronger guarantee than "loopback-only."

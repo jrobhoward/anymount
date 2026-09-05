@@ -13,15 +13,15 @@ seam.
 
 ```mermaid
 flowchart LR
-    A["ReadOnlyFs impl\n(user code)"] --> B["MountBuilder::mount()"]
-    B --> C{"Backend::Auto\nresolves per OS"}
-    C --> D["fuse.rs\n(Linux)"]
-    C --> E["nfs/\n(macOS)"]
-    C --> F["cfapi.rs\n(Windows)"]
+    A["ReadOnlyFs impl<br/>(user code)"] --> B["MountBuilder::mount()"]
+    B --> C{"Backend::Auto<br/>resolves per OS"}
+    C --> D["fuse.rs<br/>(Linux)"]
+    C --> E["nfs/<br/>(macOS)"]
+    C --> F["cfapi.rs<br/>(Windows)"]
     D --> G["fusermount3"]
-    E --> H["mount_nfs\n(built-in NFSv3 client)"]
+    E --> H["mount_nfs<br/>(built-in NFSv3 client)"]
     F --> I["Cloud Files API"]
-    B -.shared seams.-> J["preflight, readdir::emit, Mounted"]
+    B -.->|shared seams| J["preflight, readdir::emit, Mounted"]
 ```
 
 `preflight` (capability checks), `readdir::emit` (paginated listing), and the
