@@ -53,6 +53,15 @@ for why none of the value types are `#[non_exhaustive]`.
 - NFS: a `mount_nfs` that failed to spawn leaked the server thread and left
   its listener bound for the life of the process. Only the non-zero-exit path
   stopped and joined the thread; both paths now do.
+- NFS: macOS showed the mount's 128-bit handle secret, as 32 hex characters,
+  wherever it names the volume — the Finder window title, the sidebar, and
+  every open and save dialog. macOS takes the volume name from the last
+  component of the remote path, which was the secret itself. The export path
+  is now `/export/<secret>/<label>`, where the label comes from
+  `MountBuilder::fs_name`, so the name a caller already chose is the name that
+  is displayed. Authorization is unchanged: the secret is still required, and
+  the `MNT` handler still checks the segment before the first `/` and only
+  that, so a label cannot be mistaken for it.
 - All three backends trusted the byte count `ReadOnlyFs::read_at` returns. A
   count past the end of the buffer made `Vec::truncate` a no-op, so NFS
   reported a `count` larger than the data that followed it, which

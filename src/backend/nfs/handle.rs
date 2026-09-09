@@ -60,8 +60,9 @@ impl FileHandle3 {
         Some(Ino(u64::from_be_bytes(bytes[16..24].try_into().ok()?)))
     }
 
-    /// Lowercase hex rendering of the secret, used in the `MNT` export path
-    /// (`/export/<hex>`) and the `mount_nfs` command line.
+    /// Lowercase hex rendering of the secret, used as the first segment of
+    /// the `MNT` export path (`/export/<hex>/<label>`) and on the `mount_nfs`
+    /// command line.
     pub(super) fn secret_hex(&self) -> String {
         self.secret.iter().map(|b| format!("{b:02x}")).collect()
     }

@@ -62,7 +62,15 @@ impl MountBuilder {
         self
     }
 
-    /// Name shown in `mount(8)` output and Explorer. Defaults to `anymount`.
+    /// Name shown in `mount(8)` output, Finder and Explorer. Defaults to
+    /// `anymount`.
+    ///
+    /// On macOS this is also the volume name, so it is what titles a Finder
+    /// window and labels the mount in a file dialog. Characters that cannot
+    /// appear in that position, `/` and control characters, are replaced with
+    /// `-`, and the name is truncated for display; a name left with nothing
+    /// usable falls back to `anymount`. The name is unchanged everywhere else
+    /// it appears.
     pub fn fs_name(mut self, name: impl Into<String>) -> Self {
         self.fs_name = name.into();
         self

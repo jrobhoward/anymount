@@ -80,6 +80,56 @@ const CAPS: Caps = Caps {
     threads: false,
 };
 
+/// Longest volume label appended to an export path.
+///
+/// Finder truncates a long volume name in the places it matters anyway, and
+/// the whole `dirpath` has to stay inside `MNTPATHLEN` (1024) alongside the
+/// prefix and the 32-character secret.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MAX_LABEL_LEN: usize = 64;
+
+/// Fallback when [`MountBuilder::fs_name`] has no characters a label can use.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const DEFAULT_LABEL: &str = "anymount";
+
+/// Reduce `fs_name` to something usable as the last segment of an export path,
+/// which is what macOS shows as the volume name.
+///
+/// `fs_name` is arbitrary caller input, so two classes of character are
+/// filtered rather than trusted. A `/` would add a path segment, changing
+/// which text the `MNT` handler checks against the secret. A control
+/// character would render as a box in Finder and could garble a terminal
+/// printing `mount` output. Both become `-`, runs of them collapse, and the
+/// result is trimmed of leading and trailing separators so a name like `../..`
+/// cannot produce a label of nothing but dashes.
+///
+/// Everything else is kept, accented and non-Latin names included: the label
+/// is decorative, and nothing ever compares it, so the Unicode normalisation
+/// macOS applies to names it displays has nothing to break here.
+///
+/// Compiled on every Unix rather than only macOS so the filtering can be
+/// tested without a Mac, the same reasoning that keeps the wire layer
+/// unconditional.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn volume_label(fs_name: &str) -> String {
+    let mut out = String::new();
+    for ch in fs_name.chars().take(MAX_LABEL_LEN) {
+        match (ch == '/' || ch.is_control(), out.ends_with('-')) {
+            (false, _) => out.push(ch),
+            // Collapse a run of rejected characters into one separator.
+            (true, false) => out.push('-'),
+            (true, true) => {}
+        }
+    }
+
+    let trimmed = out.trim_matches(|c: char| c == '-' || c == '.' || c.is_whitespace());
+    if trimmed.is_empty() {
+        DEFAULT_LABEL.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 /// A live NFS mount: the client-side mount plus the server thread behind it.
 #[cfg(target_os = "macos")]
 #[derive(Debug)]
@@ -150,7 +200,16 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<NfsHa
         std::thread::spawn(move || server::run(listener, fs, handle, stop))
     };
 
-    let export = format!("/export/{}", handle.secret_hex());
+    // `/export/<secret>/<label>`, not `/export/<secret>`. macOS titles a
+    // Finder window, and names the volume, from the last component of the
+    // remote path, so a bare secret export shows up throughout the UI as 32
+    // hex characters. The label is decorative — `mount_proto` checks the
+    // secret segment and ignores this one.
+    let export = format!(
+        "/export/{}/{}",
+        handle.secret_hex(),
+        volume_label(&builder.fs_name)
+    );
     let mountpoint = builder.mountpoint.clone();
 
     // Both ways this can fail — `mount_nfs` not spawning at all, and

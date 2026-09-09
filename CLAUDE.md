@@ -131,9 +131,17 @@ Do not add `fuser`'s default features to the Linux target.
 `AUTH_SYS` trusts client-supplied uid/gid with no verification. `FileHandle3`
 (`backend/nfs/handle.rs`) embeds a per-mount random 128-bit secret in every
 handle this server hands out, and the same secret is required as a literal
-path segment in `MNT` (`/export/<hex secret>`). Do not add real credential
-checking on top of this without revisiting `docs/ARCHITECTURE.md`'s platform
-constraints — it is a deliberate choice, not an oversight.
+path segment in `MNT` (`/export/<hex secret>/<label>`). Do not add real
+credential checking on top of this without revisiting
+`docs/ARCHITECTURE.md`'s platform constraints — it is a deliberate choice, not
+an oversight.
+
+The trailing `<label>` is decorative and authorizes nothing. It exists because
+macOS names a volume, and titles a Finder window, from the last component of
+the remote path, so a bare secret export shows 32 hex characters throughout the
+UI. `mount_proto`'s check reads the segment before the first `/` and only that,
+so a label is never mistaken for the secret; keep it that way when touching the
+parser.
 
 **NFS mounts `soft` with a short `timeo`/`retrans`, not classic NFS `hard`
 semantics.** `soft,timeo=20,retrans=2` (`backend/nfs/mod.rs`'s `mount_nfs`

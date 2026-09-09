@@ -1,10 +1,17 @@
 //! MOUNT program (100005, version 3) — RFC 1813 Appendix I.
 //!
-//! Single-export server: the only valid `dirpath` is `/export/<32 lowercase
-//! hex chars>`, where the hex is this mount's [`FileHandle3`] secret. Any
-//! other shape is `MNT3ERR_NOENT`; the right shape with the wrong secret is
-//! `MNT3ERR_ACCES`, which `mount_nfs` reports as "Permission denied, exit
-//! 13".
+//! Single-export server: a valid `dirpath` is `/export/<32 lowercase hex
+//! chars>`, where the hex is this mount's [`FileHandle3`] secret, optionally
+//! followed by `/<label>`. Any other shape is `MNT3ERR_NOENT`; the right shape
+//! with the wrong secret is `MNT3ERR_ACCES`, which `mount_nfs` reports as
+//! "Permission denied, exit 13".
+//!
+//! The label is what macOS shows as the volume name, since it titles a Finder
+//! window from the last component of the remote path — a bare secret export
+//! puts 32 hex characters in the window title, the sidebar and every file
+//! dialog. `mount` appends it; nothing here checks it. Authorization reads the
+//! segment before the first `/` and only that, so a label containing a
+//! separator cannot shift which text is compared against the secret.
 
 use crate::types::ROOT_INO;
 
@@ -41,10 +48,16 @@ fn mnt(r: &mut Reader<'_>, handle: &FileHandle3) -> ProcOutcome {
         w.write_u32(MNT3ERR_NOENT);
         return ProcOutcome::Success(w);
     };
-    let Some(hex) = dirpath.strip_prefix(EXPORT_PREFIX) else {
+    let Some(rest) = dirpath.strip_prefix(EXPORT_PREFIX) else {
         w.write_u32(MNT3ERR_NOENT);
         return ProcOutcome::Success(w);
     };
+    // The secret is the first segment. Anything after it is the volume label
+    // `mount` appends so Finder has something better than 32 hex characters to
+    // title a window with; it authorizes nothing and is ignored here. Taking
+    // the segment before the first `/` means a label containing a separator
+    // cannot shift which text is checked against the secret.
+    let hex = rest.split_once('/').map_or(rest, |(hex, _label)| hex);
     if hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         w.write_u32(MNT3ERR_NOENT);
         return ProcOutcome::Success(w);
