@@ -23,6 +23,11 @@ pub enum Backend {
     /// FUSE, via `fusermount3`. Linux only.
     Fuse,
     /// NFSv3 via the built-in `mount_nfs` client. macOS only.
+    ///
+    /// The server binds to loopback, and the per-mount secret authorizing it
+    /// is published in the system mount table, so a mount is readable by any
+    /// local process rather than only by the user that created it. See
+    /// [`docs/GAPS.md`](https://github.com/jrobhoward/anymount/blob/main/docs/GAPS.md).
     Nfs,
     /// Windows Cloud Files API.
     CfApi,

@@ -37,6 +37,12 @@
 //! entries into that directory rather than covering it, and clears them again
 //! on unmount.
 //!
+//! On macOS a mount is readable by any local process. The NFS server binds to
+//! loopback, and the secret authorizing it is published in the system mount
+//! table, where any user on the machine can read it. Content that other local
+//! users should not see needs a different mechanism; see
+//! [`docs/GAPS.md`][gaps].
+//!
 //! # Licensing
 //!
 //! `anymount` is MIT OR Apache-2.0 with no copyleft anywhere in its dependency

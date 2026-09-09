@@ -113,6 +113,11 @@ version that adds one is likely a 2.0, since the value types below are not
 
 - Read-only. Write operations report `EROFS`, and that is the scope rather
   than a stage. Every limitation is catalogued in [`docs/GAPS.md`](docs/GAPS.md).
+- On macOS, any local process can read a mount's contents. The NFS server
+  binds to loopback, and the per-mount secret authorizing it is published in
+  the system mount table, where any user on the machine can read it. Mounting
+  content that other local users should not see needs a different mechanism.
+  See [`docs/GAPS.md`](docs/GAPS.md).
 - No symlinks or hardlinks: `FileKind` has only `File` and `Directory`.
 - No extended attributes beyond `listxattr`/`getxattr`'s harmless defaults,
   and no Windows alternate data streams.

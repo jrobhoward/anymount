@@ -19,10 +19,13 @@ embeds it. Three areas are the crate's own:
   local process can connect to it. Authorization is a 128-bit per-mount secret
   embedded in every file handle and required as a path segment in `MNT`; there
   is no credential checking beyond that, by design (see `docs/ARCHITECTURE.md`).
-  A way to read or enumerate a mount's contents without holding that secret is
-  a vulnerability. So is a message that panics a server thread, hangs it, or
-  makes it allocate proportionally to what a client claims rather than to what
-  it sent.
+  That secret is not confidential: `mount_nfs` publishes it in the system mount
+  table, so a mount is readable by any local process, and reading one that way
+  is a documented limitation rather than a vulnerability — see
+  `docs/GAPS.md`. A way to read or enumerate a mount's contents *without*
+  the secret is a vulnerability. So is a message that panics a server thread,
+  hangs it, or makes it allocate proportionally to what a client claims rather
+  than to what it sent.
 - The FFI in `backend/cfapi.rs`. Memory unsafety reachable from a callback the
   platform invokes is a vulnerability.
 - Path handling around the mountpoint. cfapi's unmount deletes the

@@ -81,6 +81,17 @@ for why none of the value types are `#[non_exhaustive]`.
   FreeBSD, NetBSD and illumos. Mounting is unchanged: still Linux, macOS and
   Windows only.
 
+### Documented
+
+- The macOS NFS backend's per-mount secret is not confidential: `mount_nfs`
+  publishes it in the system mount table, so a mount is readable by any local
+  process rather than only by the user that created it. This follows from the
+  mechanism, since the export path is the only channel for handing a credential
+  to the OS's own client. `README.md`, the crate docs and `Backend::Nfs` now
+  carry the caveat, `docs/GAPS.md` records it with the alternatives that do not
+  apply and a two-secret design that would narrow it, and `SECURITY.md`'s scope
+  no longer implies that holding the secret is difficult.
+
 ### Added
 
 - `MountBuilder::threads`, setting the worker-thread count. FUSE only, and
