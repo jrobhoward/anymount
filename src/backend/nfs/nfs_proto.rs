@@ -278,6 +278,13 @@ fn read<F: ReadOnlyFs>(r: &mut Reader<'_>, ctx: &Ctx<'_, F>) -> ProcOutcome {
             let mut buf = vec![0u8; count as usize];
             match ctx.fs.read_at(fh, offset, &mut buf) {
                 Ok(n) => {
+                    // Clamped, not trusted: `read_at` is implemented outside
+                    // this crate, and an `n` past the buffer's end would leave
+                    // `truncate` a no-op, so the `count` written below would
+                    // claim more bytes than the `opaque` that follows it
+                    // carries. That is a malformed reply, which desynchronises
+                    // the client rather than failing visibly.
+                    let n = n.min(buf.len());
                     buf.truncate(n);
                     // A failed release cannot be reported usefully to the
                     // client, so it is logged rather than turned into a

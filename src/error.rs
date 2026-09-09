@@ -148,11 +148,18 @@ impl FsError {
             Self::NotADirectory => libc::ENOTDIR,
             Self::IsADirectory => libc::EISDIR,
             Self::InvalidArgument => libc::EINVAL,
-            // ENODATA is the Linux spelling; macOS calls it ENOATTR.
+            // ENODATA is the Linux spelling; macOS calls it ENOATTR. The name
+            // varies again on the other Unixes, none of which this crate
+            // mounts on, so POSIX's ENOTSUP stands in there rather than a
+            // per-platform guess. Without that arm the match is
+            // non-exhaustive anywhere but Linux and macOS, and the crate does
+            // not build.
             #[cfg(target_os = "linux")]
             Self::NoXattr => libc::ENODATA,
             #[cfg(target_os = "macos")]
             Self::NoXattr => libc::ENOATTR,
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            Self::NoXattr => libc::ENOTSUP,
             Self::ReadOnly => libc::EROFS,
             Self::Unsupported(_) => libc::ENOSYS,
             Self::Io(e) => e.raw_os_error().unwrap_or(libc::EIO),

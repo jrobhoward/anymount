@@ -44,6 +44,33 @@ for why none of the value types are `#[non_exhaustive]`.
 - NFS: a `READDIR3`/`READDIRPLUS3` whose budget could not hold even one entry
   was answered with an empty listing and `eof: false`, which invites a client
   to reissue the identical call forever. It now reports `NFS3ERR_TOOSMALL`.
+- cfapi: a failed `CfDisconnectSyncRoot` abandoned the rest of teardown. The
+  sync root stayed registered, which is machine-persistent state, so the
+  mountpoint could never be registered again; and the handle was dropped
+  anyway, freeing the context every still-armed callback holds a pointer into.
+  Unmount now runs every step regardless and reports the first error at the
+  end, matching what the NFS backend already did with its server thread.
+- NFS: a `mount_nfs` that failed to spawn leaked the server thread and left
+  its listener bound for the life of the process. Only the non-zero-exit path
+  stopped and joined the thread; both paths now do.
+- All three backends trusted the byte count `ReadOnlyFs::read_at` returns. A
+  count past the end of the buffer made `Vec::truncate` a no-op, so NFS
+  reported a `count` larger than the data that followed it, which
+  desynchronises the client; FUSE served the untouched tail of its allocation
+  as file content; and cfapi panicked, which the callback boundary swallows,
+  leaving the platform to wait out its fetch timeout with no completion. The
+  count is now clamped to the buffer at each of the three call sites.
+
+### Fixed (build)
+
+- The crate did not build on any Unix other than Linux and macOS, despite
+  `types.rs`, `error.rs` and the NFS wire layer all being gated on plain
+  `cfg(unix)`. `libc` was declared only for the two mounting platforms, and
+  `FsError::to_errno`'s `NoXattr` arm existed only for those two, leaving a
+  non-exhaustive match everywhere else. `libc` now covers `cfg(unix)`, and
+  `NoXattr` falls back to `ENOTSUP` off Linux and macOS. Verified against
+  FreeBSD, NetBSD and illumos. Mounting is unchanged: still Linux, macOS and
+  Windows only.
 
 ### Added
 

@@ -174,7 +174,11 @@ impl<F: ReadOnlyFs> fuser::Filesystem for FuseAdapter<F> {
         let mut buf = vec![0u8; read_buffer_len(size)];
         match self.fs.read_at(FileHandle(fh.0), offset, &mut buf) {
             Ok(n) => {
-                buf.truncate(n);
+                // Clamped, not trusted: `read_at` is implemented outside this
+                // crate, and an `n` past the buffer's end would leave
+                // `truncate` a no-op, serving the untouched tail of the
+                // allocation to the application as file content.
+                buf.truncate(n.min(buf.len()));
                 reply.data(&buf);
             }
             Err(e) => reply.error(errno(&e)),

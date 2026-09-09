@@ -152,7 +152,14 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<NfsHa
 
     let export = format!("/export/{}", handle.secret_hex());
     let mountpoint = builder.mountpoint.clone();
-    let output = Command::new("mount_nfs")
+
+    // Both ways this can fail — `mount_nfs` not spawning at all, and
+    // `mount_nfs` running but refusing the mount — have to stop and join the
+    // server thread before returning. Otherwise the thread outlives the failed
+    // `mount()` call, holding its listener bound and the filesystem alive,
+    // with nothing left to shut it down. Resolving the outcome first and
+    // handling the error once keeps the two paths from drifting apart.
+    let outcome = Command::new("mount_nfs")
         .arg("-o")
         .arg(format!(
             "vers=3,tcp,port={port},mountport={port},noresvport,soft,timeo=20,retrans=2"
@@ -160,16 +167,23 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<NfsHa
         .arg(format!("127.0.0.1:{export}"))
         .arg(&mountpoint)
         .output()
-        .map_err(|e| FsError::Io(e).context("spawning mount_nfs"))?;
+        .map_err(|e| FsError::Io(e).context("spawning mount_nfs"))
+        .and_then(|output| {
+            if output.status.success() {
+                Ok(())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(FsError::Other(format!(
+                    "mount_nfs exited with {}: {}",
+                    output.status, stderr
+                )))
+            }
+        });
 
-    if !output.status.success() {
+    if let Err(e) = outcome {
         stop.store(true, Ordering::Relaxed);
         let _ = server_thread.join();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(FsError::Other(format!(
-            "mount_nfs exited with {}: {}",
-            output.status, stderr
-        )));
+        return Err(e);
     }
 
     Ok(NfsHandle {

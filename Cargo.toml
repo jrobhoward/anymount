@@ -65,12 +65,15 @@ tempfile = "3"
 # allows unprivileged mounts.
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.18", default-features = false, optional = true }
-libc = "0.2"
 
-# macOS: the NFS backend needs `libc::arc4random_buf` and `libc::unmount` for
-# its file-handle secret and clean teardown; `types.rs`'s
-# `current_uid`/`current_gid` (cfg(unix)) also cover macOS.
-[target.'cfg(target_os = "macos")'.dependencies]
+# Every Unix, not only the two that mount: `types.rs`'s
+# `current_uid`/`current_gid` and `error.rs`'s `to_errno` are `cfg(unix)`, so
+# scoping `libc` to Linux and macOS left the crate failing to build on any
+# other Unix — including the NFS wire layer that `backend/mod.rs` compiles on
+# `cfg(unix)` precisely so it can be tested off a Mac. macOS additionally uses
+# `libc::arc4random_buf` and `libc::unmount` for the NFS backend's file-handle
+# secret and teardown.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]

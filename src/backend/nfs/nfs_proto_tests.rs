@@ -384,3 +384,105 @@ proptest! {
         prop_assert_eq!(got, expected);
     }
 }
+
+/// A filesystem whose `read_at` claims to have written more bytes than the
+/// buffer it was handed can hold. Not a hypothetical: `ReadOnlyFs` is
+/// implemented outside this crate, so the count is untrusted input.
+struct LyingReadFs {
+    /// What `read_at` reports, regardless of the buffer's real size.
+    claims: usize,
+}
+
+impl ReadOnlyFs for LyingReadFs {
+    fn lookup(&self, _parent: Ino, _name: &OsStr) -> Result<FileAttr> {
+        Err(FsError::NotFound)
+    }
+
+    fn getattr(&self, ino: Ino) -> Result<FileAttr> {
+        Ok(FileAttr::file(ino, 10))
+    }
+
+    fn readdir(&self, _ino: Ino, _offset: u64) -> Result<Vec<DirEntry>> {
+        Ok(Vec::new())
+    }
+
+    fn open(&self, _ino: Ino) -> Result<FileHandle> {
+        Ok(FileHandle(1))
+    }
+
+    fn read_at(&self, _fh: FileHandle, _offset: u64, _buf: &mut [u8]) -> Result<usize> {
+        Ok(self.claims)
+    }
+
+    fn release(&self, _fh: FileHandle) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Dispatch one `READ3` and return the encoded reply body.
+fn read3(fs: &impl ReadOnlyFs, handle: &FileHandle3, offset: u64, count: u32) -> Vec<u8> {
+    let c = ctx(fs, handle);
+    let mut w = Writer::new();
+    w.write_opaque_var(&handle.encode(Ino(2)));
+    w.write_u64(offset);
+    w.write_u32(count);
+    let bytes = w.into_bytes();
+    let mut r = Reader::new(&bytes);
+    let ProcOutcome::Success(out) = dispatch(6, &mut r, &c) else {
+        panic!("READ3 did not succeed");
+    };
+    out.into_bytes()
+}
+
+/// `READ3`'s reply is `nfsstat3`, `post_op_attr`, `count`, `eof`, then the
+/// data as an `opaque<>`. Returns the count field and the data's own length
+/// prefix, which must agree.
+fn read3_count_and_data_len(reply: &[u8]) -> (u32, u32) {
+    let mut r = Reader::new(reply);
+    assert_eq!(r.read_u32(), Some(NFS3_OK));
+    assert_eq!(r.read_bool(), Some(true), "post_op_attr should be present");
+    // Skip the fattr3 body: 21 four-byte words.
+    for _ in 0..21 {
+        r.read_u32().expect("fattr3 is truncated");
+    }
+    let count = r.read_u32().expect("count is missing");
+    r.read_bool().expect("eof is missing");
+    let data_len = r.read_u32().expect("data length is missing");
+    (count, data_len)
+}
+
+#[test]
+fn read____an_honest_implementation____reports_the_bytes_it_produced() {
+    let handle = FileHandle3::for_test(1);
+    let fs = LyingReadFs { claims: 4 };
+    let (count, data_len) = read3_count_and_data_len(&read3(&fs, &handle, 0, 8));
+    assert_eq!(count, 4);
+    assert_eq!(data_len, 4);
+}
+
+#[test]
+fn read____a_count_larger_than_the_buffer____is_clamped_not_reported_verbatim() {
+    // An unclamped `n` leaves `truncate` a no-op, so `count` claims more
+    // bytes than the `opaque<>` after it carries. That is a malformed reply:
+    // the client desynchronises rather than seeing an error.
+    let handle = FileHandle3::for_test(1);
+    let fs = LyingReadFs { claims: 4096 };
+    let (count, data_len) = read3_count_and_data_len(&read3(&fs, &handle, 0, 8));
+    assert_eq!(
+        count, 8,
+        "count must not exceed the buffer that was offered"
+    );
+    assert_eq!(data_len, count, "count and the data length must agree");
+}
+
+#[test]
+fn read____a_count_larger_than_the_buffer____does_not_overstate_eof() {
+    // `eof` is computed from `offset + n`; an unclamped `n` would set it on a
+    // read that did not actually reach the end of the file.
+    let handle = FileHandle3::for_test(1);
+    let fs = LyingReadFs { claims: usize::MAX };
+    let reply = read3(&fs, &handle, 0, 4);
+    let (count, data_len) = read3_count_and_data_len(&reply);
+    assert_eq!(count, 4);
+    assert_eq!(data_len, 4);
+}

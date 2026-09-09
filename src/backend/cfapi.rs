@@ -145,18 +145,45 @@ impl<F: ReadOnlyFs> std::fmt::Debug for CfApiHandle<F> {
 }
 
 impl<F: ReadOnlyFs> Mounted for CfApiHandle<F> {
+    /// Every teardown step runs even if an earlier one failed, and the first
+    /// error is reported at the end.
+    ///
+    /// Returning early on a failed `CfDisconnectSyncRoot` would drop `self`,
+    /// and with it the `Box<Context<F>>` every armed callback holds a pointer
+    /// into, while the sync root was still connected — a later `FETCH_DATA`
+    /// would read freed memory. It would also skip `CfUnregisterSyncRoot`,
+    /// leaving a registration that outlives the process and a mountpoint that
+    /// can never be registered again. This mirrors the NFS backend, which
+    /// stops and joins its server thread even when the client-side unmount
+    /// fails.
     fn unmount(self: Box<Self>) -> Result<()> {
         // SAFETY: `self.connection` came from a `CfConnectSyncRoot` call that
         // succeeded in `mount`, and this is the only place it is disconnected.
-        unsafe { CfDisconnectSyncRoot(self.connection) }?;
+        let disconnected = unsafe { CfDisconnectSyncRoot(self.connection) }
+            .map_err(|e| FsError::from(e).context("disconnecting the cfapi sync root"));
 
         let wide = to_wide(&self.mountpoint);
         // SAFETY: `self.mountpoint` was successfully registered in `mount`;
         // `wide` is a valid null-terminated wide string live for the call.
-        unsafe { CfUnregisterSyncRoot(PCWSTR::from_raw(wide.as_ptr())) }?;
+        // Attempted even if the disconnect above failed: an unregistered sync
+        // root is machine-persistent state, so leaving one behind is worse
+        // than a redundant call.
+        let unregistered = unsafe { CfUnregisterSyncRoot(PCWSTR::from_raw(wide.as_ptr())) }
+            .map_err(|e| FsError::from(e).context("unregistering the cfapi sync root"));
 
         remove_leftover_placeholders(&self.mountpoint);
-        Ok(())
+
+        // `self`, and the `Context<F>` the callbacks point into, is dropped
+        // only here — after both calls above, so no callback can still be
+        // running against it.
+        match (disconnected, unregistered) {
+            (Err(e), Err(second)) => {
+                backend_warn!("anymount/cfapi: {second} (after an earlier teardown failure)");
+                Err(e)
+            }
+            (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+            (Ok(()), Ok(())) => Ok(()),
+        }
     }
 
     fn backend(&self) -> Backend {
@@ -717,6 +744,12 @@ fn stream_chunks<F: ReadOnlyFs>(
                 return Err(e);
             }
             Ok(n) => {
+                // Clamped, not trusted: `read_at` is implemented outside this
+                // crate, and an `n` past what was asked for would panic the
+                // slice below. That panic is caught at the callback boundary,
+                // which means no completion is ever sent and the platform
+                // waits out its fetch timeout instead of reporting anything.
+                let n = n.min(want);
                 transfer_data(info, &buf[..n], offset + sent, n as i64, 0);
                 sent += n as i64;
             }
