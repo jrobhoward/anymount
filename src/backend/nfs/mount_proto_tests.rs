@@ -5,12 +5,23 @@
 use super::*;
 use crate::backend::nfs::xdr::Writer;
 
+/// The public value `MNT` checks, drawn independently of the handle secret.
+/// Every test below uses this one, so a path built from `handle` rather than
+/// from `export` fails — which is the split the production code relies on.
+fn export_secret() -> ExportSecret {
+    ExportSecret::for_test(1)
+}
+
 fn call_mnt(handle: &FileHandle3, dirpath: &str) -> ProcOutcome {
+    call_mnt_with(&export_secret(), handle, dirpath)
+}
+
+fn call_mnt_with(export: &ExportSecret, handle: &FileHandle3, dirpath: &str) -> ProcOutcome {
     let mut w = Writer::new();
     w.write_string(std::ffi::OsStr::new(dirpath));
     let bytes = w.into_bytes();
     let mut r = Reader::new(&bytes);
-    dispatch(1, &mut r, handle)
+    dispatch(1, &mut r, export, handle)
 }
 
 fn status_of(outcome: ProcOutcome) -> u32 {
@@ -26,7 +37,7 @@ fn status_of(outcome: ProcOutcome) -> u32 {
 #[test]
 fn mnt____correct_export_path____succeeds_with_root_handle() {
     let handle = FileHandle3::for_test(1);
-    let path = format!("{EXPORT_PREFIX}{}", handle.secret_hex());
+    let path = format!("{EXPORT_PREFIX}{}", export_secret().hex().to_owned());
     assert_eq!(status_of(call_mnt(&handle, &path)), MNT3_OK);
 }
 
@@ -55,7 +66,7 @@ fn umnt____any_path____is_accepted_unconditionally() {
     let mut r = Reader::new(&bytes);
     let handle = FileHandle3::for_test(1);
     assert!(matches!(
-        dispatch(3, &mut r, &handle),
+        dispatch(3, &mut r, &export_secret(), &handle),
         ProcOutcome::Success(_)
     ));
 }
@@ -65,7 +76,7 @@ fn export____no_args____returns_empty_list() {
     let bytes: [u8; 0] = [];
     let mut r = Reader::new(&bytes);
     let handle = FileHandle3::for_test(1);
-    let outcome = dispatch(5, &mut r, &handle);
+    let outcome = dispatch(5, &mut r, &export_secret(), &handle);
     assert!(matches!(outcome, ProcOutcome::Success(_)));
 }
 
@@ -75,7 +86,7 @@ fn dispatch____unknown_proc____is_proc_unavail() {
     let mut r = Reader::new(&bytes);
     let handle = FileHandle3::for_test(1);
     assert!(matches!(
-        dispatch(99, &mut r, &handle),
+        dispatch(99, &mut r, &export_secret(), &handle),
         ProcOutcome::ProcUnavail
     ));
 }
@@ -85,7 +96,10 @@ fn mnt____export_path_with_a_volume_label____succeeds_with_root_handle() {
     // The shape `mount` actually sends: the secret, then the label macOS uses
     // as the volume name.
     let handle = FileHandle3::for_test(1);
-    let path = format!("{EXPORT_PREFIX}{}/anymount-memfs", handle.secret_hex());
+    let path = format!(
+        "{EXPORT_PREFIX}{}/anymount-memfs",
+        export_secret().hex().to_owned()
+    );
     assert_eq!(status_of(call_mnt(&handle, &path)), MNT3_OK);
 }
 
@@ -94,7 +108,10 @@ fn mnt____a_label_that_is_wrong____does_not_affect_authorization() {
     // The label authorizes nothing, so any label with the right secret works.
     let handle = FileHandle3::for_test(1);
     for label in ["", "a b c", "..", "with/separators/in/it"] {
-        let path = format!("{EXPORT_PREFIX}{}/{label}", handle.secret_hex());
+        let path = format!(
+            "{EXPORT_PREFIX}{}/{label}",
+            export_secret().hex().to_owned()
+        );
         assert_eq!(
             status_of(call_mnt(&handle, &path)),
             MNT3_OK,
@@ -110,7 +127,10 @@ fn mnt____correct_secret_in_the_label_rather_than_the_first_segment____is_acces(
     // and have a wrong first segment accepted.
     let handle = FileHandle3::for_test(1);
     let wrong = "0".repeat(32);
-    let path = format!("{EXPORT_PREFIX}{wrong}/{}", handle.secret_hex());
+    let path = format!(
+        "{EXPORT_PREFIX}{wrong}/{}",
+        export_secret().hex().to_owned()
+    );
     assert_eq!(status_of(call_mnt(&handle, &path)), MNT3ERR_ACCES);
 }
 

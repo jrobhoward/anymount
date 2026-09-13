@@ -50,6 +50,22 @@ jobs:
       # Every backend cfg'd out: the configuration `mount()` must still build
       # and report `FsError::Unsupported` in.
       - run: cargo clippy --all-targets --no-default-features -- -Dwarnings
+      # One NFS transport at a time. Each drops code the other keeps — the
+      # MOUNT protocol with `nfs-tcp`, the `mount(2)` argument encoder with
+      # `nfs-local-socket` — so a `cfg` that only happens to work when both are
+      # on is caught here rather than by a downstream build.
+      - run: cargo clippy --all-targets --no-default-features --features nfs,nfs-local-socket -- -Dwarnings
+      - run: cargo clippy --all-targets --no-default-features --features nfs,nfs-tcp -- -Dwarnings
+      - run: cargo test --no-default-features --features nfs,nfs-local-socket
+      - run: cargo test --no-default-features --features nfs,nfs-tcp
+      # `nfs` with no transport is a deliberate compile error, so a build that
+      # succeeds here is the regression.
+      - name: nfs without a transport is refused
+        run: |
+          if cargo check --no-default-features --features nfs 2>/dev/null; then
+            echo "expected a compile error for nfs with no transport" >&2
+            exit 1
+          fi
       # Scoped to this step rather than the workflow `env:` block, for the
       # reason given at the top of this file: a broken intra-doc link should
       # fail, a warning inside a dependency should not.
@@ -125,6 +141,18 @@ jobs:
           test "$(stat -f %i /tmp/anymount-nfs-ci/subdir/..)" != "$(stat -f %i /tmp/anymount-nfs-ci/subdir)"
           wait
           ! mount | grep -qF /tmp/anymount-nfs-ci
+
+      # The same checks against each transport on its own, through the test
+      # that also asserts what must *not* be published. The local-socket path
+      # depends on an interface macOS does not document, so a release that
+      # changes it shows up here as a failure rather than as a silent fallback.
+      - name: Both NFS transports, checked with real tools
+        run: |
+          set -euo pipefail
+          cargo test --no-default-features --features nfs,nfs-local-socket \
+            --test real_mount_macos -- --ignored --test-threads=1
+          cargo test --no-default-features --features nfs,nfs-tcp \
+            --test real_mount_macos -- --ignored --test-threads=1
 
   # Windows is the third runner that completes a real mount. cfapi needs no
   # admin step and no reboot, so this is unattended like the other two; without

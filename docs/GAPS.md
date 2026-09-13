@@ -165,10 +165,12 @@ hand-rolled envelope ever needs replacing.
 ## NFS: at most 16 concurrent connections
 
 `backend/nfs/server.rs` serves at most `MAX_CONNECTIONS` connections at once,
-reaping finished workers each time round the accept loop. The listener binds to
-loopback and only this mount's own `mount_nfs` client has business connecting,
-so the cap exists to stop a local process opening sockets in a loop from
-costing one thread per connection until unmount. A legitimate client that hits
+reaping finished workers each time round the accept loop. Only this mount's own
+kernel NFS client has business connecting, so the cap exists to stop a local
+process opening sockets in a loop from costing one thread per connection until
+unmount. It matters on the loopback fallback, which any local account can
+reach; on the local-socket transport the socket's permissions already decide
+who may connect. A legitimate client that hits
 the cap waits in the kernel's listen backlog until a slot frees.
 
 *To change:* raise the constant, or move to a thread pool with a work queue, if
@@ -184,86 +186,93 @@ only matter for an NFS client this crate has not been exercised against.
 *To change:* buffer fragments keyed by connection until the last-fragment bit
 is set, then dispatch the reassembled body.
 
-## NFS: any local process can read a mount's contents
+## NFS: the loopback fallback is readable by any local account
 
-The macOS backend authorizes with a 128-bit per-mount secret, carried both as a
-segment of the `MNT` export path and as a prefix on every file handle
-(`backend/nfs/handle.rs`). `mount_nfs` records the export path in the system
-mount table, so the secret is published there for the life of the mount:
+The macOS backend prefers an `AF_UNIX` socket and falls back to loopback TCP.
+Only the fallback has this gap; `Mount::nfs_uses_local_socket` reports which
+path a mount took, and `MountBuilder::nfs_require_local_socket` refuses the
+fallback outright.
+
+On the local-socket path the root file handle goes to `mount(2)` in the
+argument buffer, so the MOUNT protocol never runs and no credential goes into
+a path. Nothing listens on the network, and reaching the server means opening
+a socket at mode 0600 inside a directory at mode 0700. The mount table shows
+the socket path and a decorative label, with no credential in either:
+
+```text
+</tmp/.anymount-baa6e763d48286a1/s>:/anymount-memfs on /private/tmp/anymount-demo
+```
+
+The fallback runs `mount_nfs` over loopback, which records an export path in
+the system mount table. The mount table is system-wide, and `nfsstat -m`
+reprints the same path for any local account, so the value in it is public for
+the life of the mount:
 
 ```text
 127.0.0.1:/export/771c61056ffa820a2ce973f5a78954c4/anymount-memfs on /private/tmp/demo
 ```
 
-The mount table is system-wide rather than per-user, and loopback has no
-per-user isolation, so any account on the machine can read the secret and reach
-the server. Doing so grants everything the secret grants: the contents can be
-mounted again at another path, or read over the wire directly, without going
-through the original mountpoint or its permissions. The server performs no
-other credential check. The secret also appears in `mount_nfs`'s command line,
-visible through `ps`, for the short window while the mount is being
-established.
+Two independent random values keep that from granting anything. The public
+value authorizes `MNT` and nothing else. The value that prefixes file handles
+is never written anywhere a reader can reach, and is not derived from the
+public one. `MNT` is answered only until `mount_nfs` exits, which is safe
+because `MNT` is issued exactly once per mount lifetime — a soft mount that
+loses its connection reconnects and carries on serving without asking again.
+So by the time the public value reaches a surface another account can read,
+there is no call left to spend it on.
 
-The effect is that a mount is readable by any local process, not only by the
-user that created it. Content that other local users should not see needs a
-different mechanism.
+What remains is a race. The public value is on `mount_nfs`'s command line
+while the mount is being established, where a same-uid process or root can
+read it — macOS restricts `KERN_PROCARGS2` to the calling uid, so `ps` shows
+other accounts only the executable path. A process polling for it could beat
+the legitimate client to `MNT`. Loopback also has no per-user isolation, so
+any local account can connect to the server and guess; the value is 128 bits.
 
-This follows from the mechanism rather than from an oversight. The OS's own
-`mount_nfs` client is what performs the mount, and the export path is the only
-channel for handing it a credential, so whatever authorizes the mount ends up
-in the mount table. Three alternatives were considered and do not apply:
+*To change:* nothing further on the fallback itself — it is the fallback
+because it cannot be made as good as the primary path on documented
+interfaces. Build without the `nfs-tcp` feature, or set
+`nfs_require_local_socket`, and the gap is gone along with the transport.
+Prefer the builder option where it matters: cargo features unify, so another
+crate in the dependency graph enabling `nfs-tcp` restores the fallback for
+everyone, while the builder option cannot be overridden from outside.
 
-- Requiring a reserved source port, which no unprivileged process can bind,
-  would restrict access to root. `/sbin/mount_nfs` is not setuid, so an
-  unprivileged `MNT` call cannot come from one, and unprivileged mounting is a
-  property this backend is built around.
-- Peer credentials would identify the connecting process, but macOS exposes
-  them only for Unix domain sockets, and `mount_nfs` speaks TCP.
-- `RPCSEC_GSS` is the credential mechanism NFSv3 specifies, and it requires a
-  Kerberos realm and a GSS implementation on both ends.
+## NFS: the local-socket transport depends on a private macOS interface
 
-*To change:* split the one secret into two independent random values. A public
-value stays in the export path, and an independent value, never written to the
-mount table, prefixes file handles. `MNT` validates the public value and
-returns a root handle carrying the private one, and the crate stops honoring
-`MNT` once `mount_nfs` has exited successfully, which it can do because it
-controls the mount's whole lifecycle. The public value only reaches the mount
-table after `MNT` has already succeeded, so by the time it can be read it opens
-nothing, and file handles cannot be forged without the value that was never
-published.
+`mount_nfs` exposes none of the three attributes the local-socket path needs:
+its option table has no file-handle option and no mount-from option, and its
+local-socket parsing is not reachable from the command line. All three share
+one prerequisite, a hand-built `mount(2)` argument buffer whose layout
+`<nfs/nfs.h>` declares behind `__APPLE_API_PRIVATE`. The attribute numbers are
+in the header; the shape of the buffer is not.
 
-The two values have to be drawn independently. Deriving one from the other
-would let anyone reading the mount table compute the handle secret, which is
-the property being bought.
+Two undocumented things are relied on, not one. The buffer layout is the
+larger. The smaller is the socket netid, `ticotsord`: `mount_nfs(8)` documents
+`proto=<netid>` as accepting `tcp`, `udp`, `tcp6` and `udp6` only, and the
+shipped binary parses `ticotsord` and `ticlts` without listing them.
 
-Two details make this more than a substitution. `FileHandle3::cookieverf`
-currently returns the first eight bytes of the secret, and `nfs_proto.rs`
-writes it into every `READDIR3` and `READDIRPLUS3` reply, so it would publish
-half the private value to anyone able to read a listing; it should take its own
-value, or a constant, since the content is immutable for the mount's life and
-the verifier needs neither secrecy nor unpredictability. Separately, whether
-the macOS client ever re-issues `MNT` after the initial mount, for instance
-when a soft mount reconnects, has not been tested; if it does, refusing later
-`MNT` calls would break reconnection.
+The exposure is to a change in behaviour, not to a change in the SDK. Nothing
+is compiled against the private header: there is no build script and no C in
+the crate, the attribute numbers are transcribed into Rust constants, and the
+only libc calls involved are `mount(2)` and `unmount(2)`, both of which have
+man pages. A macOS that removed or renamed the declarations would not break the
+build.
 
-This narrows the exposure rather than removing it. The public value is still
-visible through `ps` while the mount is being established, so a process polling
-for it could race the legitimate client.
+A macOS that changes the encoding does break the path, and three things bound
+the damage. A wrong buffer is rejected rather than partly honored — a length
+read in the wrong byte order returns `ENOMEM`, an over-long buffer returns
+`E2BIG`, and a misaligned attribute stream returns `ENOMEM`. `mount` then
+checks the root back through the mountpoint rather than trusting the return
+code. And a failure falls back to `nfs-tcp` where it is compiled in, so the
+outcome is a working mount with weaker properties rather than no mount.
 
-## NFS: file handle secret comparison is not constant-time
+`mount_args.rs` pins the encoded bytes in a unit test, so a change made here
+is visible without a mount. That test cannot see a change made by Apple.
 
-`FileHandle3::resolve` (`backend/nfs/handle.rs`) compares the client-supplied
-16-byte secret with `==`, which is not constant-time. The timing side channel
-this could in principle leak has not been measured. A mount is bound to
-`127.0.0.1` only, which limits who could attempt this.
-
-It also matters less than it appears while the gap above stands: a local
-process can read the same secret out of the mount table, so there is nothing a
-timing attack would recover that is not already available. Splitting the secret
-in two, as that section describes, is what would make this worth fixing.
-
-*To change:* use a constant-time comparison (e.g. `subtle::ConstantTimeEq`) if
-this ever needs a stronger guarantee than "loopback-only."
+*To change:* build without `nfs-local-socket`, which removes the encoder along
+with the transport and leaves a backend that uses documented interfaces only,
+at the cost of the disclosure described in the section above. The durable fix
+for having both is FSKit, which is not used — see "macOS: no FSKit backend"
+above.
 
 ## Windows: the mountpoint must be empty, and unmounting clears it
 

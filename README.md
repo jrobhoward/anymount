@@ -113,10 +113,13 @@ version that adds one is likely a 2.0, since the value types below are not
 
 - Read-only. Write operations report `EROFS`, and that is the scope rather
   than a stage. Every limitation is catalogued in [`docs/GAPS.md`](docs/GAPS.md).
-- On macOS, any local process can read a mount's contents. The NFS server
-  binds to loopback, and the per-mount secret authorizing it is published in
-  the system mount table, where any user on the machine can read it. Mounting
-  content that other local users should not see needs a different mechanism.
+- On macOS, a mount that falls back to loopback TCP is reachable by any local
+  account. The NFS backend prefers an `AF_UNIX` socket, where access is decided
+  by file permissions and nothing is published to the system mount table, but
+  that path needs an interface macOS does not document and falls back when it
+  fails. `Mount::nfs_uses_local_socket` reports which path a mount took, and
+  `MountBuilder::nfs_require_local_socket` refuses the fallback rather than
+  mounting on the weaker terms.
   See [`docs/GAPS.md`](docs/GAPS.md).
 - No symlinks or hardlinks: `FileKind` has only `File` and `Directory`.
 - No extended attributes beyond `listxattr`/`getxattr`'s harmless defaults,
@@ -139,12 +142,47 @@ version that adds one is likely a 2.0, since the value types below are not
 |---|---|---|
 | `fuse` | yes | FUSE backend. Linux only; compiles to nothing elsewhere |
 | `nfs` | yes | NFS backend. macOS only; needs no dependency of its own |
+| `nfs-local-socket` | yes | NFS over an `AF_UNIX` socket. Implies `nfs` |
+| `nfs-tcp` | yes | NFS over loopback TCP, run through `mount_nfs`. Implies `nfs` |
 | `cfapi` | yes | Cloud Files backend. Windows only |
 | `tracing` | no | Logs mounts, unmounts and the errors a backend has to discard |
 
 All three backends default on because cargo cannot express a per-OS default;
 the platform dependencies are `cfg`-scoped, so a Linux build never fetches the
 `windows` crate.
+
+### Choosing a macOS NFS transport
+
+The two transport features are a trade between how private a mount is and how
+much of the mechanism macOS documents. Both are on by default, which tries the
+local socket first and falls back to loopback TCP.
+
+| Features | Mount is private to the mounting user | Documented interfaces only | If the private encoding breaks |
+|---|---|---|---|
+| `nfs-local-socket`, `nfs-tcp` | when the local socket is used | no | falls back to TCP |
+| `nfs-local-socket` alone | yes | no | mount fails |
+| `nfs-tcp` alone | no | yes | not applicable |
+
+`nfs-local-socket` passes the root file handle to `mount(2)` in an argument
+buffer whose layout macOS does not document — `<nfs/nfs.h>` declares the
+attribute numbers behind `__APPLE_API_PRIVATE` and the layout nowhere, and the
+socket netid the buffer names is absent from `mount_nfs(8)`. Nothing is
+compiled against that header: the constants are transcribed, and the only libc
+calls are `mount(2)` and `unmount(2)`, both of which have man pages. The risk
+is that a future macOS changes the encoding, not that the crate fails to build.
+
+`nfs-tcp` runs `/sbin/mount_nfs` with options its man page documents, and uses
+nothing undocumented. It costs reachability: the export path reaches the system
+mount table and `nfsstat -m`, where any local account can read it.
+
+Turning `nfs-tcp` off does not guarantee its absence, because cargo features
+unify — another crate in the dependency graph enabling it brings the fallback
+back for everyone. `MountBuilder::nfs_require_local_socket` is the guarantee,
+and it cannot be overridden from outside. `Mount::nfs_uses_local_socket`
+reports which transport a live mount got.
+
+`nfs` with neither transport is a compile error rather than a backend that
+cannot mount.
 
 ## Status
 

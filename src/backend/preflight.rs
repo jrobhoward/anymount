@@ -6,8 +6,9 @@
 //! binary prints, which is three different messages for one mistake. Second,
 //! [`MountBuilder`] carries options only some backends can honor —
 //! `allow_other` and `auto_unmount` are FUSE mount options with no NFS or
-//! cfapi counterpart — and a request for one that cannot be honored is an
-//! error naming the backend, not a silent no-op.
+//! cfapi counterpart, and `nfs_require_local_socket` is the reverse — and a
+//! request for one that cannot be honored is an error naming the backend, not
+//! a silent no-op.
 //!
 //! A backend supplies a [`Caps`] and calls [`check`]. That is the whole
 //! contract; there is no per-backend policy to re-derive.
@@ -34,6 +35,12 @@ pub(crate) struct Caps {
     /// files would destroy them. The check belongs here rather than in the
     /// backend so the refusal reads the same as every other option error.
     pub(crate) empty_mountpoint: bool,
+    /// Whether this backend has a local-socket transport to require.
+    ///
+    /// Unlike the options above this is not fixed per backend: the NFS backend
+    /// has one only when the `nfs-local-socket` feature is on, so the refusal
+    /// has to name the feature as well as the backend.
+    pub(crate) nfs_local_socket: bool,
 }
 
 /// Validate a [`MountBuilder`] against what the chosen backend can do.
@@ -57,6 +64,15 @@ pub(crate) fn check(builder: &MountBuilder, caps: &Caps) -> Result<()> {
         return Err(FsError::InvalidArgument.context(format!(
             "the {} backend cannot honor threads; it does not own its own \
              worker pool. Leave it unset, or mount with Backend::Fuse on Linux",
+            caps.name
+        )));
+    }
+
+    if builder.nfs_require_local_socket && !caps.nfs_local_socket {
+        return Err(FsError::InvalidArgument.context(format!(
+            "the {} backend cannot honor nfs_require_local_socket; it has no \
+             local-socket transport to require. It is a macOS NFS option, and \
+             needs the `nfs-local-socket` feature",
             caps.name
         )));
     }

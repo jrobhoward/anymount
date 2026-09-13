@@ -16,6 +16,7 @@ const FULL: Caps = Caps {
     auto_unmount: true,
     empty_mountpoint: false,
     threads: true,
+    nfs_local_socket: true,
 };
 
 const MINIMAL: Caps = Caps {
@@ -24,6 +25,7 @@ const MINIMAL: Caps = Caps {
     auto_unmount: false,
     empty_mountpoint: false,
     threads: false,
+    nfs_local_socket: false,
 };
 
 /// Shaped like cfapi: projects into the mountpoint, so it must be empty.
@@ -33,6 +35,7 @@ const PROJECTING: Caps = Caps {
     auto_unmount: false,
     empty_mountpoint: true,
     threads: false,
+    nfs_local_socket: false,
 };
 
 fn builder_at(path: &std::path::Path) -> MountBuilder {
@@ -83,6 +86,35 @@ fn preflight____auto_unmount_on_a_backend_without_it____names_that_backend() {
     let msg = err.to_string();
     assert!(msg.contains("test-minimal"), "{msg}");
     assert!(msg.contains("auto_unmount"), "{msg}");
+}
+
+/// The one option that runs the other way: NFS has it, the other two do not,
+/// and a build without `nfs-local-socket` does not either. The message has to
+/// name the feature as well as the backend, because turning the feature on is
+/// the fix in one of those cases and switching backend is the fix in the
+/// others.
+#[test]
+fn preflight____nfs_require_local_socket_on_a_backend_without_it____names_that_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = check(
+        &builder_at(dir.path()).nfs_require_local_socket(true),
+        &MINIMAL,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("test-minimal"), "{msg}");
+    assert!(msg.contains("nfs_require_local_socket"), "{msg}");
+    assert!(msg.contains("nfs-local-socket"), "{msg}");
+}
+
+#[test]
+fn preflight____nfs_require_local_socket_on_a_backend_with_it____is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    check(
+        &builder_at(dir.path()).nfs_require_local_socket(true),
+        &FULL,
+    )
+    .unwrap();
 }
 
 #[test]

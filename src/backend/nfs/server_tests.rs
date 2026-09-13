@@ -11,6 +11,7 @@ use crate::backend::nfs::xdr::Writer;
 use crate::error::{FsError, Result};
 use crate::types::{DirEntry, FileAttr, FileHandle, Ino};
 use std::ffi::OsStr;
+use std::net::{TcpListener, TcpStream};
 
 /// The routing tests never reach a filesystem operation, so every method
 /// fails: reaching one would be the bug.
@@ -52,9 +53,25 @@ fn call(prog: u32, vers: u32, proc_: u32) -> Vec<u8> {
     w.into_bytes()
 }
 
+/// A server that still answers `MNT`, as one does between binding the socket
+/// and `mount_nfs` exiting.
+fn serving_mount() -> Config {
+    Config {
+        #[cfg(feature = "nfs-tcp")]
+        serve_mount: Arc::new(AtomicBool::new(true)),
+        #[cfg(feature = "nfs-tcp")]
+        export: super::super::handle::ExportSecret::for_test(1),
+    }
+}
+
 fn dispatch_to(prog: u32, vers: u32, proc_: u32) -> Option<Vec<u8>> {
     let handle = FileHandle3::for_test(1);
-    handle_message(&call(prog, vers, proc_), &NeverCalled, &handle)
+    handle_message(
+        &call(prog, vers, proc_),
+        &NeverCalled,
+        &handle,
+        &serving_mount(),
+    )
 }
 
 /// `(xid, accept_stat)` from an accepted reply.
@@ -107,7 +124,7 @@ fn handle_message____a_malformed_header____gets_no_reply_at_all() {
     // No trustworthy xid, so there is nothing to address a reply to; the
     // caller closes the connection instead.
     let handle = FileHandle3::for_test(1);
-    assert!(handle_message(b"\x00\x00", &NeverCalled, &handle).is_none());
+    assert!(handle_message(b"\x00\x00", &NeverCalled, &handle, &serving_mount()).is_none());
 }
 
 #[test]
@@ -118,7 +135,8 @@ fn handle_message____an_unsupported_rpcvers____is_denied_rather_than_accepted() 
     w.write_u32(3); // rpcvers this server does not speak
     let bytes = w.into_bytes();
     let handle = FileHandle3::for_test(1);
-    let reply = handle_message(&bytes, &NeverCalled, &handle).expect("xid is known");
+    let reply =
+        handle_message(&bytes, &NeverCalled, &handle, &serving_mount()).expect("xid is known");
     let mut r = Reader::new(&reply);
     assert_eq!(r.read_u32(), Some(77));
     assert_eq!(r.read_u32(), Some(1), "REPLY");
@@ -137,8 +155,8 @@ fn handle_message____an_unsupported_rpcvers____is_denied_rather_than_accepted() 
 /// an idle connection must *wait* rather than fail instantly.
 #[test]
 fn serve_connection____accepted_socket____honours_the_read_timeout_rather_than_spinning() {
+    use TcpStream as ClientStream;
     use std::io::Read;
-    use std::net::TcpStream as ClientStream;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let addr = listener.local_addr().expect("local addr");

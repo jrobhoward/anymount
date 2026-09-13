@@ -42,6 +42,7 @@ pub struct MountBuilder {
     pub(crate) allow_other: bool,
     pub(crate) auto_unmount: bool,
     pub(crate) threads: Option<usize>,
+    pub(crate) nfs_require_local_socket: bool,
 }
 
 impl MountBuilder {
@@ -58,6 +59,7 @@ impl MountBuilder {
             allow_other: false,
             auto_unmount: false,
             threads: None,
+            nfs_require_local_socket: false,
         }
     }
 
@@ -108,6 +110,31 @@ impl MountBuilder {
         self
     }
 
+    /// Refuse to mount rather than fall back to loopback TCP (macOS).
+    ///
+    /// The NFS backend prefers an `AF_UNIX` socket, passing the root file
+    /// handle to `mount(2)` directly: nothing listens on the network, no
+    /// credential reaches the system mount table, and access is decided by the
+    /// socket's file permissions. That path needs an argument buffer whose
+    /// layout macOS does not document, so when it fails the backend falls back
+    /// to running `mount_nfs` over loopback, where a value in the export path
+    /// is readable by every local account for as long as the mount is being
+    /// established.
+    ///
+    /// Setting this turns that fallback into an error. Use it when the content
+    /// being served must not be reachable by other local users, and a failed
+    /// mount is the better outcome. [`Mount::nfs_uses_local_socket`] reports
+    /// which path a mount actually took.
+    ///
+    /// Off by default. NFS only; the FUSE and cfapi backends reject the
+    /// request at [`mount`](Self::mount) time rather than ignoring it, and so
+    /// does a build with the `nfs-local-socket` feature turned off, which has
+    /// no such path to require.
+    pub fn nfs_require_local_socket(mut self, yes: bool) -> Self {
+        self.nfs_require_local_socket = yes;
+        self
+    }
+
     /// Serve kernel requests on `n` worker threads.
     ///
     /// Concurrency comes from serving several requests at once, not from
@@ -149,12 +176,15 @@ pub struct Mount {
     mountpoint: PathBuf,
     /// Cached from the handle, so it stays reportable after teardown.
     backend: Backend,
+    /// Cached from the handle, for the same reason.
+    local_socket: bool,
 }
 
 impl Mount {
     pub(crate) fn new(inner: Box<dyn backend::Mounted>, mountpoint: PathBuf) -> Self {
         Self {
             backend: inner.backend(),
+            local_socket: inner.uses_local_socket(),
             inner: Some(inner),
             mountpoint,
         }
@@ -171,6 +201,21 @@ impl Mount {
     /// mount time.
     pub fn backend(&self) -> Backend {
         self.backend
+    }
+
+    /// Whether this mount is served over an `AF_UNIX` socket (macOS).
+    ///
+    /// True only for an NFS mount that took the local-socket path, where the
+    /// root file handle went to `mount(2)` directly, nothing listens on the
+    /// network, and no credential reaches the system mount table. False for a
+    /// mount that fell back to loopback TCP, and false on every other
+    /// platform.
+    ///
+    /// [`MountBuilder::nfs_require_local_socket`] turns that fallback into a
+    /// mount error, for a caller who would rather not mount than mount on the
+    /// weaker terms.
+    pub fn nfs_uses_local_socket(&self) -> bool {
+        self.local_socket
     }
 
     /// Unmount explicitly, surfacing errors that `drop` would swallow.

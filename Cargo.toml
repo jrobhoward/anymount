@@ -29,17 +29,44 @@ targets = [
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["fuse", "cfapi", "nfs"]
+default = ["fuse", "cfapi", "nfs", "nfs-local-socket", "nfs-tcp"]
 
 # FUSE via `fusermount3` (Linux only — macOS's decided backend is NFS, not
 # FUSE; see docs/PLAN.md). No libfuse to link, just the helper binary, so this
 # has no extra system requirement and is safe to default-enable everywhere
 # `cargo build`/`cargo test` might run. Inert (compiles to nothing) off Linux.
 fuse = ["dep:fuser"]
-# NFSv3 server via the built-in `mount_nfs` client (macOS only). Hand-rolled
+# NFSv3 server mounted by the OS's own NFS client (macOS only). Hand-rolled
 # RPC/XDR over std::net — no new dependency; `libc::arc4random_buf` (already a
 # macOS target dependency) supplies the per-mount secret. Inert off macOS.
+#
+# `nfs` on its own supplies the server but no way to mount it, so at least one
+# of the two transports below has to be enabled with it; `backend/nfs/mod.rs`
+# refuses the combination at compile time rather than building a backend that
+# cannot mount.
 nfs = []
+
+# The two transports below trade privacy against how much of the mechanism
+# macOS documents. Both on (the default) tries the local socket and falls back;
+# `nfs-local-socket` alone fails rather than falling back; `nfs-tcp` alone
+# relies on nothing undocumented. README.md has the comparison, and note that
+# cargo features unify — only `MountBuilder::nfs_require_local_socket`
+# guarantees the fallback is not used.
+
+# The private-but-better option. Mounts over an `AF_UNIX` socket, with the root
+# file handle handed to `mount(2)` directly so the MOUNT protocol never runs:
+# nothing listens on the network, no credential reaches the mount table, and
+# file permissions on the socket decide who may connect. The argument buffer it
+# builds has a layout macOS does not document, so it is tried first rather than
+# depended on. Nothing is compiled against a private header — the constants are
+# transcribed and only `mount(2)`/`unmount(2)` are called — so a macOS that
+# changes the encoding costs a failed mount, not a failed build.
+nfs-local-socket = ["nfs"]
+# The documented-but-weaker option. Runs `mount_nfs` with options its man page
+# documents and uses no private or undocumented interface. The export path
+# carries a public value that reaches the system mount table and `nfsstat -m`,
+# so a mount is reachable by other local accounts. See docs/GAPS.md.
+nfs-tcp = ["nfs"]
 # Windows Cloud Files (cfapi) backend. Inert off Windows.
 cfapi = ["dep:windows"]
 # Per-operation tracing spans.

@@ -61,6 +61,7 @@ const CAPS: Caps = Caps {
     auto_unmount: true,
     empty_mountpoint: false,
     threads: true,
+    nfs_local_socket: false,
 };
 
 /// Live FUSE session.

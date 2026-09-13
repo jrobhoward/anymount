@@ -4,6 +4,55 @@ Notable changes to `anymount`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- macOS: a second NFS transport, an `AF_UNIX` socket with the root file handle
+  handed to `mount(2)` directly. The MOUNT protocol never runs, nothing listens
+  on the network, and no credential reaches the system mount table — access is
+  decided by the socket's file permissions, mode 0600 inside a directory at
+  mode 0700. It is tried first and falls back to loopback TCP, because it needs
+  an argument buffer whose layout macOS does not document.
+- `MountBuilder::nfs_require_local_socket` turns that fallback into a mount
+  error, for content that must not be reachable by other local accounts.
+  Rejected by name on the FUSE and cfapi backends, and in a build without the
+  `nfs-local-socket` feature.
+- `Mount::nfs_uses_local_socket` reports which transport a live mount got.
+  False on every other platform.
+- Two cargo features, `nfs-local-socket` and `nfs-tcp`, both on by default and
+  both implying `nfs`. Either alone builds only that transport; `nfs` with
+  neither is now a compile error rather than a backend that cannot mount. They
+  trade privacy against how much of the mechanism macOS documents:
+  `nfs-tcp` alone relies on nothing undocumented, `nfs-local-socket` alone
+  keeps a mount private to the user that made it, and both on tries the second
+  and falls back to the first. `README.md` has the comparison. Note that cargo
+  features unify: a dependency graph where anything enables `nfs-tcp` gets the
+  fallback back, so `nfs_require_local_socket` is the only way to guarantee its
+  absence.
+
+### Changed
+
+- macOS: the value in the `MNT` export path and the value prefixing file
+  handles are now drawn independently, where they used to be one secret. The
+  export path reaches the system mount table and `nfsstat -m`; the handle
+  secret no longer does. `MNT` also stops being answered once `mount_nfs` has
+  exited, which is safe because `MNT` is issued exactly once per mount and
+  reconnection does not repeat it. Together these mean the published value
+  opens nothing by the time it can be read.
+- macOS: the loopback mount now passes `ro`, matching the read-only scope the
+  crate already had and the `MNT_RDONLY` the local-socket path sets.
+
+### Fixed
+
+- macOS: `READDIR3` and `READDIRPLUS3` replies carried the first eight bytes of
+  the file-handle secret as the `cookieverf3`, publishing half of it to anyone
+  able to read a directory listing. The verifier is now a constant, which is
+  all it needs to be: a mount's content is immutable for its lifetime.
+- macOS: the file-handle secret comparison is now constant-time. It was
+  previously `==`, and mattered little while the same secret was readable from
+  the mount table; splitting the two values is what made it worth fixing.
+
 ## 1.0.0
 
 First stable release. The public API is frozen: `ReadOnlyFs`, the value types

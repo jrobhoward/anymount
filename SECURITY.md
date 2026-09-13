@@ -15,17 +15,19 @@ expected within a week.
 `anymount` is a library, so most of its attack surface belongs to whatever
 embeds it. Three areas are the crate's own:
 
-- The macOS NFS server. It binds to `127.0.0.1` on an ephemeral port, so any
-  local process can connect to it. Authorization is a 128-bit per-mount secret
-  embedded in every file handle and required as a path segment in `MNT`; there
-  is no credential checking beyond that, by design (see `docs/ARCHITECTURE.md`).
-  That secret is not confidential: `mount_nfs` publishes it in the system mount
-  table, so a mount is readable by any local process, and reading one that way
-  is a documented limitation rather than a vulnerability — see
-  `docs/GAPS.md`. A way to read or enumerate a mount's contents *without*
-  the secret is a vulnerability. So is a message that panics a server thread,
-  hangs it, or makes it allocate proportionally to what a client claims rather
-  than to what it sent.
+- The macOS NFS server. It serves an `AF_UNIX` socket where it can, and falls
+  back to `127.0.0.1` on an ephemeral port, where any local process can connect
+  to it. Authorization is a 128-bit per-mount secret embedded in every file
+  handle; there is no credential checking beyond that, by design (see
+  `docs/ARCHITECTURE.md`). On the fallback a second, independent value
+  authorizes `MNT`, and `mount_nfs` publishes that one in the system mount
+  table — reading a mount by way of the published value during the window
+  before `mount_nfs` exits is a documented limitation rather than a
+  vulnerability, see `docs/GAPS.md`. A way to read or enumerate a mount's
+  contents *without* the handle secret is a vulnerability, as is anything that
+  recovers the handle secret from a published surface. So is a message that
+  panics a server thread, hangs it, or makes it allocate proportionally to what
+  a client claims rather than to what it sent.
 - The FFI in `backend/cfapi.rs`. Memory unsafety reachable from a callback the
   platform invokes is a vulnerability.
 - Path handling around the mountpoint. cfapi's unmount deletes the
@@ -34,9 +36,6 @@ embeds it. Three areas are the crate's own:
 
 ## What is not
 
-- The non-constant-time comparison of the NFS handle secret. Known, documented
-  in `docs/GAPS.md`, and bounded by the loopback binding. A measured timing
-  attack against it would be a report worth making.
 - Anything reachable only by an implementation of `ReadOnlyFs` itself. That
   code is trusted by construction: it is the filesystem being served.
 - Denial of service by a local process that could equally kill the mounting

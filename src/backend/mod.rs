@@ -79,6 +79,19 @@ pub(crate) trait Mounted: Send + Sync + std::fmt::Debug {
 
     /// Which mechanism this handle came from, for diagnostics.
     fn backend(&self) -> Backend;
+
+    /// Whether this mount is served over an `AF_UNIX` socket with the root
+    /// file handle handed to `mount(2)` directly.
+    ///
+    /// NFS-specific, and false for every other backend, because it reports a
+    /// property only that backend has a weaker alternative to: the loopback
+    /// fallback publishes a value to the system mount table and is reachable
+    /// by other local accounts, and a caller who cares which one they got has
+    /// no other way to find out. A default rather than a required method, so
+    /// a backend with one transport does not restate it.
+    fn uses_local_socket(&self) -> bool {
+        false
+    }
 }
 
 /// Resolve [`Backend::Auto`] and hand off to the chosen backend.

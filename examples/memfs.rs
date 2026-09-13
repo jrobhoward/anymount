@@ -189,6 +189,19 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .mount(MemFs::new())?;
 
     println!("mounted at {}", mount.mountpoint().display());
+    if cfg!(target_os = "macos") {
+        // Which NFS transport the mount landed on. The local-socket path is
+        // private to this user; the fallback is reachable by any local
+        // account. See MountBuilder::nfs_require_local_socket.
+        println!(
+            "transport: {}",
+            if mount.nfs_uses_local_socket() {
+                "AF_UNIX socket"
+            } else {
+                "loopback TCP"
+            }
+        );
+    }
     println!("try:  ls -lR {mountpoint}");
     println!("      cat {mountpoint}/hello.txt");
     println!("      sha256sum {mountpoint}/numbers.txt");

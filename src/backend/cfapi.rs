@@ -93,6 +93,7 @@ const CAPS: Caps = Caps {
     auto_unmount: false,
     empty_mountpoint: true,
     threads: false,
+    nfs_local_socket: false,
 };
 
 /// Identifies `anymount` as a Cloud Files provider. Only has to be stable and

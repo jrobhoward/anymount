@@ -1,10 +1,16 @@
 //! MOUNT program (100005, version 3) — RFC 1813 Appendix I.
 //!
 //! Single-export server: a valid `dirpath` is `/export/<32 lowercase hex
-//! chars>`, where the hex is this mount's [`FileHandle3`] secret, optionally
+//! chars>`, where the hex is this mount's [`ExportSecret`], optionally
 //! followed by `/<label>`. Any other shape is `MNT3ERR_NOENT`; the right shape
 //! with the wrong secret is `MNT3ERR_ACCES`, which `mount_nfs` reports as
 //! "Permission denied, exit 13".
+//!
+//! The value checked here and the value a returned handle carries are drawn
+//! independently. This one reaches the system mount table as soon as the mount
+//! succeeds; the handle secret never does. `MNT` is answered only until
+//! `mount_nfs` exits, so by the time the public value can be read it opens
+//! nothing.
 //!
 //! The label is what macOS shows as the volume name, since it titles a Finder
 //! window from the last component of the remote path — a bare secret export
@@ -15,7 +21,7 @@
 
 use crate::types::ROOT_INO;
 
-use super::handle::FileHandle3;
+use super::handle::{ExportSecret, FileHandle3};
 use super::rpc::ProcOutcome;
 use super::xdr::{Reader, Writer};
 
@@ -28,17 +34,22 @@ const MNTPATHLEN: u32 = 1024;
 const EXPORT_PREFIX: &str = "/export/";
 
 /// Route one MOUNT-program call to its procedure handler.
-pub(super) fn dispatch(proc_: u32, r: &mut Reader<'_>, handle: &FileHandle3) -> ProcOutcome {
+pub(super) fn dispatch(
+    proc_: u32,
+    r: &mut Reader<'_>,
+    export: &ExportSecret,
+    handle: &FileHandle3,
+) -> ProcOutcome {
     match proc_ {
         0 => ProcOutcome::Success(Writer::new()), // MOUNTPROC3_NULL
-        1 => mnt(r, handle),
+        1 => mnt(r, export, handle),
         3 => umnt(r),
-        5 => export(r),
+        5 => export_list(r),
         _ => ProcOutcome::ProcUnavail,
     }
 }
 
-fn mnt(r: &mut Reader<'_>, handle: &FileHandle3) -> ProcOutcome {
+fn mnt(r: &mut Reader<'_>, export: &ExportSecret, handle: &FileHandle3) -> ProcOutcome {
     let Some(dirpath) = r.read_string(MNTPATHLEN) else {
         return ProcOutcome::GarbageArgs;
     };
@@ -62,7 +73,7 @@ fn mnt(r: &mut Reader<'_>, handle: &FileHandle3) -> ProcOutcome {
         w.write_u32(MNT3ERR_NOENT);
         return ProcOutcome::Success(w);
     }
-    if hex != handle.secret_hex() {
+    if !export.matches(hex) {
         w.write_u32(MNT3ERR_ACCES);
         return ProcOutcome::Success(w);
     }
@@ -83,7 +94,7 @@ fn umnt(r: &mut Reader<'_>) -> ProcOutcome {
     ProcOutcome::Success(Writer::new())
 }
 
-fn export(_r: &mut Reader<'_>) -> ProcOutcome {
+fn export_list(_r: &mut Reader<'_>) -> ProcOutcome {
     let mut w = Writer::new();
     w.write_bool(false); // empty export list
     ProcOutcome::Success(w)

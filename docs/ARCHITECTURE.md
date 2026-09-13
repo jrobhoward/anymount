@@ -41,7 +41,7 @@ backends rather than reimplemented per platform.
 | `backend/readdir.rs` | Cookie arithmetic and `emit`, the paginated-listing driver shared by all three backends. |
 | `backend/trace.rs` | `backend_warn!`/`backend_info!`, no-ops without the `tracing` feature. |
 | `backend/fuse.rs` | Linux backend, via `fusermount3`. |
-| `backend/nfs/` | macOS backend: a from-scratch NFSv3 server (`xdr.rs`, `rpc.rs`, `mount_proto.rs`, `nfs_proto.rs`, `handle.rs`, `server.rs`) mounted with the OS's own `mount_nfs`. Only `mod.rs`'s `mount` and `NfsHandle` are macOS-gated; the wire layer builds and tests on any Unix. |
+| `backend/nfs/` | macOS backend: a from-scratch NFSv3 server (`xdr.rs`, `rpc.rs`, `mount_proto.rs`, `nfs_proto.rs`, `handle.rs`, `transport.rs`, `server.rs`) mounted by the OS's own NFS client, over an `AF_UNIX` socket (`local.rs`, `mount_args.rs`) or loopback TCP (`tcp.rs`). Only `local.rs`, `tcp.rs` and `NfsHandle` are macOS-gated; the wire layer and the argument encoder build and test on any Unix. |
 | `backend/cfapi.rs` | Windows backend, via the Cloud Files API. |
 
 ## Why three backends, not one mechanism
@@ -98,7 +98,27 @@ One line each; see the named module's rustdoc or `docs/GAPS.md` for detail.
   code allowed to call `readdir` directly.
 - NFS authorizes with a random per-mount secret embedded in every file
   handle, not `AUTH_SYS` (an unprivileged client can claim any uid/gid over
-  `AUTH_SYS`, so it verifies nothing). The mount binds to `127.0.0.1` only.
+  `AUTH_SYS`, so it verifies nothing).
+- NFS has two transports, tried in that order: an `AF_UNIX` socket with the
+  root handle passed to `mount(2)` directly, and loopback TCP mounted by
+  `mount_nfs`. The first publishes no credential and is reachable only through
+  a socket the mounting user owns; the second is the fallback for a macOS that
+  changes the undocumented argument encoding, and is readable by any local
+  account. `nfs_require_local_socket` refuses the fallback. The `nfs-local-socket`
+  and `nfs-tcp` features decide which are compiled in; cargo features unify, so
+  only the builder option is a guarantee.
+- The two transports also split on which interfaces they depend on, which is
+  the second reason they are separate features. `nfs-tcp` alone uses only
+  documented ones — `mount_nfs(8)` options, `mount(2)`, `unmount(2)` — so a
+  build that excludes `nfs-local-socket` relies on nothing private.
+  `nfs-local-socket` needs the argument buffer layout and the `ticotsord`
+  netid, neither of which macOS documents. Neither transport compiles against
+  a private header: the constants are transcribed rather than included, so the
+  exposure is to changed behaviour rather than to a changed SDK.
+- NFS's `mount(2)` argument buffer is built by hand against a layout
+  `<nfs/nfs.h>` does not declare. `mount_args.rs` pins the bytes in a test, and
+  `local.rs` reads the root back through the mountpoint rather than trusting
+  the syscall's return code.
 - NFS mounts `soft` with a short `timeo`/`retrans` rather than classic `hard`
   semantics, so a crashed server times out in seconds instead of hanging
   every read behind a modal dialog.
