@@ -29,6 +29,19 @@ use crate::mount::{Backend, Mount, MountBuilder};
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 pub(crate) mod fuse;
 
+// `nfs` on its own builds a server with no way to mount it. The check lives
+// here, not in `nfs/mod.rs`: that module is `cfg(unix)`, so a guard inside it
+// is absent on Windows and the misconfiguration builds clean on one platform
+// and fails on the other two.
+#[cfg(all(
+    feature = "nfs",
+    not(any(feature = "nfs-local-socket", feature = "nfs-tcp"))
+))]
+compile_error!(
+    "feature \"nfs\" builds the NFS server but no way to mount it: enable \
+     \"nfs-local-socket\", \"nfs-tcp\", or both"
+);
+
 // The NFS wire layer — XDR, ONC RPC framing, and the MOUNT and NFS procedure
 // tables — is byte manipulation with no platform API in it, so it is compiled
 // and tested on every Unix rather than only on macOS. That is the same

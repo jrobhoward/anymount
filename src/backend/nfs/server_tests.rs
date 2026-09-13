@@ -91,10 +91,24 @@ fn handle_message____nfs_v3_null____is_accepted() {
     assert_eq!(accepted(&reply), (77, 0));
 }
 
+#[cfg(feature = "nfs-tcp")]
 #[test]
 fn handle_message____mount_v3_null____is_accepted() {
     let reply = dispatch_to(MOUNT_PROG, 3, 0).expect("a well-formed call gets a reply");
     assert_eq!(accepted(&reply), (77, 0));
+}
+
+/// The MOUNT program is compiled in with `nfs-tcp` and only with it: the
+/// local-socket transport hands the root handle to `mount(2)` itself. With
+/// that transport alone, MOUNT is a program this server does not serve at any
+/// version, so every call for it is PROG_UNAVAIL rather than PROG_MISMATCH.
+#[cfg(not(feature = "nfs-tcp"))]
+#[test]
+fn handle_message____mount_without_the_tcp_transport____is_prog_unavail() {
+    for vers in [2, 3] {
+        let reply = dispatch_to(MOUNT_PROG, vers, 0).expect("a well-formed call gets a reply");
+        assert_eq!(accepted(&reply), (77, 1), "vers {vers}"); // PROG_UNAVAIL
+    }
 }
 
 #[test]
@@ -106,8 +120,15 @@ fn handle_message____a_program_this_server_does_not_serve____is_prog_unavail() {
 }
 
 #[test]
-fn handle_message____a_version_other_than_three____is_prog_mismatch_on_both_programs() {
-    for prog in [NFS_PROG, MOUNT_PROG] {
+fn handle_message____a_version_other_than_three____is_prog_mismatch() {
+    // MOUNT is only one of the served programs with `nfs-tcp`; the case
+    // without it is covered above.
+    #[cfg(feature = "nfs-tcp")]
+    let progs = [NFS_PROG, MOUNT_PROG];
+    #[cfg(not(feature = "nfs-tcp"))]
+    let progs = [NFS_PROG];
+
+    for prog in progs {
         let reply = dispatch_to(prog, 2, 0).expect("a well-formed call gets a reply");
         assert_eq!(accepted(&reply).1, 2, "prog {prog}"); // PROG_MISMATCH
     }

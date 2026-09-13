@@ -61,6 +61,9 @@ jobs:
       # `nfs` with no transport is a deliberate compile error, so a build that
       # succeeds here is the regression.
       - name: nfs without a transport is refused
+        # Explicit shell: the default on the Windows leg of this matrix is
+        # PowerShell, which does not parse this `if`.
+        shell: bash
         run: |
           if cargo check --no-default-features --features nfs 2>/dev/null; then
             echo "expected a compile error for nfs with no transport" >&2

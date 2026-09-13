@@ -41,9 +41,9 @@ fuse = ["dep:fuser"]
 # macOS target dependency) supplies the per-mount secret. Inert off macOS.
 #
 # `nfs` on its own supplies the server but no way to mount it, so at least one
-# of the two transports below has to be enabled with it; `backend/nfs/mod.rs`
-# refuses the combination at compile time rather than building a backend that
-# cannot mount.
+# of the two transports below has to be enabled with it; `backend/mod.rs`
+# refuses the combination at compile time on every platform rather than
+# building a backend that cannot mount.
 nfs = []
 
 # The two transports below trade privacy against how much of the mechanism

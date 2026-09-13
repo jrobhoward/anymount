@@ -36,15 +36,6 @@
 //! call `libc::unmount`. Off macOS nothing calls the wire layer, hence the
 //! scoped `dead_code` allow on each module rather than a blanket one.
 
-#[cfg(all(
-    feature = "nfs",
-    not(any(feature = "nfs-local-socket", feature = "nfs-tcp"))
-))]
-compile_error!(
-    "feature \"nfs\" builds the NFS server but no way to mount it: enable \
-     \"nfs-local-socket\", \"nfs-tcp\", or both"
-);
-
 #[cfg(target_os = "macos")]
 use std::io;
 #[cfg(target_os = "macos")]

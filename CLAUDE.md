@@ -48,9 +48,35 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 # `check`). Both need `--all-targets`: without it the `*_tests.rs` files are
 # not compiled, and a `cfg`-gated test referring to something that has been
 # renamed sails straight through.  `fuse` is Linux-only and a no-op off it, so
-# no default-features flag is needed.
+# no default-features flag is needed. Needs `rustup target add` for each of
+# the two targets once.
 cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -Dwarnings
 cargo check --target aarch64-apple-darwin --all-targets
+
+# Feature combinations. A `cfg` gated on a feature is only compiled in the
+# sets that enable it, so a default build proves nothing about the others —
+# and `cargo test` alone runs neither NFS transport on its own. CI runs every
+# line below on all three runners.
+for f in "" "--features tracing" "--no-default-features" \
+         "--no-default-features --features nfs,nfs-local-socket" \
+         "--no-default-features --features nfs,nfs-tcp"; do
+  cargo clippy --all-targets $f -- -Dwarnings || break
+done
+cargo test --no-default-features --features nfs,nfs-local-socket
+cargo test --no-default-features --features nfs,nfs-tcp
+# Where features and platform interact: the transports are macOS-only code.
+cargo check --target aarch64-apple-darwin --all-targets \
+  --no-default-features --features nfs,nfs-local-socket
+cargo check --target aarch64-apple-darwin --all-targets \
+  --no-default-features --features nfs,nfs-tcp
+
+# Compile-time guards are asserted by their failure, so each needs checking on
+# every target rather than the host alone — see "A compile-time guard only
+# fires where it is compiled" below. Prints nothing when correct.
+for t in x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
+  cargo check --target $t --no-default-features --features nfs 2>/dev/null \
+    && echo "REGRESSION: nfs with no transport built for $t"
+done
 
 # Supply chain — run before adding or updating any dependency. `advisories`
 # also runs weekly in CI, since the database changes with no commit here.
@@ -155,6 +181,13 @@ the server, not in loosening the client's patience.
 rather than reassembling one. See `docs/GAPS.md` if a client that needs
 reassembly ever shows up.
 
+**A compile-time guard only fires where it is compiled.** A `compile_error!`
+that rejects a feature combination has to live in a file every platform
+builds — `backend/mod.rs`, not `backend/nfs/mod.rs`, which is `cfg(unix)` and
+so is absent on Windows. A guard placed inside the code it guards is a guard
+that is missing on exactly the configurations that most need it, and its
+absence shows up as a build that succeeds where CI expects a failure.
+
 ## Licensing is a design constraint
 
 The crate is MIT OR Apache-2.0 with no copyleft anywhere in the dependency
@@ -252,6 +285,14 @@ has its own `FileHandle`, which collides with `crate::types::FileHandle` if
 both are in scope unqualified. Don't add a `use fuser::FileHandle` there to
 "clean it up" — that reintroduces the collision.
 
+**A multi-line `run:` in the cross-OS matrix needs `shell: bash`.** The
+`build` job runs on `ubuntu-latest`, `windows-latest` and `macos-latest`, and
+the Windows default shell is PowerShell, which does not parse `if`, `[`, `&&`
+or `2>/dev/null`. A step whose body is more than one `cargo` invocation sets
+the shell explicitly. Anything more involved than a couple of lines belongs in
+a job that sets `shell: bash` under `defaults:` once, as
+`cfapi-mount-smoke-test` does.
+
 **Never set `RUSTFLAGS=-Dwarnings` in the CI environment** (or any shared
 `env:` block). It applies to *dependency* compilation too — `fuser`, `windows`,
 `proptest`, and their transitive trees — so a new stable rustc that adds one
@@ -271,6 +312,12 @@ Before considering any change complete:
 - `cargo fmt --all -- --check` is clean
 - `cargo deny check licenses bans sources advisories` passes
 - The two cross-compile checks pass
+- The feature-combination commands pass — both NFS transports on their own,
+  `--no-default-features`, and `--features tracing`. A change under a `cfg` or
+  a `#[cfg(feature)]`-gated test is not done until the sets that exclude it
+  have been run
+- Every compile-time guard still fails on every target, checked with the loop
+  above rather than assumed from the host
 - `cargo +1.88.0 check --all-targets` (MSRV) passes
 - No `.unwrap()` / `.expect()` in production code
 - New public items have doc comments (`missing_docs` catches this)
