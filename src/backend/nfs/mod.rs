@@ -162,6 +162,39 @@ fn volume_label(fs_name: &str) -> String {
     }
 }
 
+/// Whether `path` is still the root of a mount.
+///
+/// A mounted directory and the directory holding it sit on different
+/// filesystems, so their device numbers differ; once the mount is gone the two
+/// match again. That distinguishes "the unmount already happened" from "the
+/// unmount failed", which `unmount(2)` reports as `EINVAL` either way.
+///
+/// Errs toward `true`: a path that cannot be inspected produces the underlying
+/// unmount error rather than a silent success.
+///
+/// Compiled on every Unix rather than only macOS so it can be tested without a
+/// Mac, the same reasoning that keeps the wire layer unconditional.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn still_mounted(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        // The path itself is gone, so nothing is mounted on it.
+        return false;
+    };
+    let parent = match path.parent() {
+        // The filesystem root is always a mount point.
+        None => return true,
+        // A bare relative path: the parent is the working directory.
+        Some(p) if p.as_os_str().is_empty() => std::path::Path::new("."),
+        Some(p) => p,
+    };
+    match std::fs::metadata(parent) {
+        Ok(parent_meta) => parent_meta.dev() != meta.dev(),
+        Err(_) => true,
+    }
+}
+
 /// A live NFS mount: the client-side mount plus the server thread behind it.
 #[cfg(target_os = "macos")]
 #[derive(Debug)]
@@ -207,11 +240,27 @@ impl NfsHandle {
         // a user unmounting their own mount.
         let rc = unsafe { libc::unmount(path.as_ptr(), 0) };
         if rc == 0 {
-            Ok(())
-        } else {
-            Err(FsError::Io(io::Error::last_os_error())
-                .context(format!("unmount failed for {}", mountpoint.display())))
+            return Ok(());
         }
+
+        // Errno first: the check below makes syscalls of its own.
+        let err = io::Error::last_os_error();
+
+        // Ejecting the volume in Finder, or running `umount`, takes the mount
+        // down without telling this process, and `unmount(2)` then reports
+        // `EINVAL` for a path that is no longer a mount point. That is the
+        // state this call was asking for, not a failure, so teardown stays
+        // idempotent — the same answer `fuser` gives on Linux, where it checks
+        // whether the FUSE device is still mounted before unmounting again.
+        if !still_mounted(mountpoint) {
+            crate::backend::trace::backend_info!(
+                "anymount/nfs: {} was already unmounted from outside this process",
+                mountpoint.display()
+            );
+            return Ok(());
+        }
+
+        Err(FsError::Io(err).context(format!("unmount failed for {}", mountpoint.display())))
     }
 }
 
@@ -298,3 +347,7 @@ pub(crate) fn mount<F: ReadOnlyFs>(builder: MountBuilder, fs: F) -> Result<NfsHa
         Err(local_err)
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

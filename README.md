@@ -103,6 +103,8 @@ harmless thing, so an implementation only overrides what it has answers for.
 
 The mount is torn down when the `Mount` is dropped. Calling `unmount()`
 explicitly does the same thing and returns the errors that dropping discards.
+Either one succeeds on a mount the OS has already taken down, so ejecting the
+volume first costs nothing.
 
 ## Caveats worth knowing before use
 
@@ -135,6 +137,12 @@ version that adds one is likely a 2.0, since the value types below are not
   should materialise on open and serve reads from a cache.
 - The trait is synchronous. Concurrency comes from serving requests on several
   threads, not from async.
+- An unmount started by the OS is not reported. Ejecting the volume in Finder,
+  or running `umount` or `fusermount3 -u`, takes the mount down at any time;
+  the server behind it keeps running until the `Mount` is dropped, and there is
+  no query or callback for the mount having gone. A process killed by a signal
+  leaves the mount in place instead, since `Drop` does not run.
+  See [`docs/GAPS.md`](docs/GAPS.md).
 
 ## Feature flags
 

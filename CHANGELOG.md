@@ -45,6 +45,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- macOS: `Mount::unmount` no longer reports an error when the mount has already
+  been taken down from outside the process — ejecting the volume in Finder, or
+  running `umount`. `unmount(2)` answers `EINVAL` for a path that is no longer a
+  mount point, which was propagated as a failure even though teardown had
+  otherwise succeeded; the backend now checks whether the path is still a mount
+  point and treats "already gone" as success, matching what the FUSE backend
+  already did. A genuine failure, `EBUSY` from a file still open on the mount
+  for instance, is still reported. `docs/GAPS.md` covers what an OS-initiated
+  unmount does and does not do.
+
 - macOS: `READDIR3` and `READDIRPLUS3` replies carried the first eight bytes of
   the file-handle secret as the `cookieverf3`, publishing half of it to anyone
   able to read a directory listing. The verifier is now a constant, which is

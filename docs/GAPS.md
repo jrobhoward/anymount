@@ -334,6 +334,53 @@ other users would mean real per-user authorization in place of the handle
 secret — see `docs/ARCHITECTURE.md`'s platform constraints for why the
 current secret-based scheme was chosen over `AUTH_SYS`.
 
+## An OS-initiated unmount is not reported to the process
+
+The mount can be taken down by someone other than the process serving it:
+ejecting the volume in Finder, `umount` on macOS, `fusermount3 -u` on Linux.
+Nothing in the crate prevents that, and nothing reports it. `Mount` has no
+"still mounted" query and no callback for the mount going away.
+
+An OS unmount detaches the client side and no more. Reads stop, and the
+mountpoint goes back to whatever it held before. The server keeps running: the
+NFS server thread stays in its accept loop, and on the local-socket transport
+its socket directory stays under `/tmp`, until the `Mount` is dropped or
+`unmount` is called. Nothing is corrupted — the filesystem is read-only, and a
+read in flight gets an error rather than wrong data — but a long-lived process
+that mounts, is ejected, and never tears down the handle accumulates a thread
+and a directory each time.
+
+Teardown itself is idempotent, so an unmount that has already happened is not
+reported as a failure. `unmount(2)` gives `EINVAL` for a path that is no longer
+a mount point, which is indistinguishable by errno from a real failure, so the
+NFS backend checks whether the path is still a mount point — a mounted
+directory and its parent have different device numbers — and treats "already
+gone" as success. FUSE reaches the same answer through `fuser`, which tests the
+FUSE device before unmounting a second time. A genuine failure, such as `EBUSY`
+from a file still open on the mount, is still reported.
+
+A process killed by a signal is the worse case, and an eject invites one: the
+mount is gone, so the process looks finished, and `Drop` does not run on `SIGINT`
+or `SIGKILL`. On macOS that leaves the mount in the mount table pointing at a
+server that no longer exists, plus a `.anymount-<hex>` socket directory in
+`/tmp`; clear them with `umount <mountpoint>` and by removing the directory. On
+Linux, `fusermount3 -u <mountpoint>` clears the mount, and
+`MountBuilder::auto_unmount` avoids it in the first place — on FUSE only, and
+only for a mount that is not owner-private.
+
+Windows has no equivalent affordance, since a cfapi sync root is a projected
+directory rather than a volume Explorer can eject. The hazard there is the same
+signal case for a different reason: a sync root registration outlives the
+process, so a run that never reaches `unmount` leaves one behind. This section
+was verified on macOS and read off `fuser`'s source for Linux; the Windows
+behaviour is not tested.
+
+*To change:* reporting an OS unmount means either polling the mountpoint or a
+per-backend watch, and there is no macOS equivalent of the FUSE session ending
+to hang the latter on. A caller that needs it can poll `Mount::mountpoint`
+itself with `statfs` or `/proc/mounts`, which is what an added API would do. The
+API is frozen at 1.0 regardless, so this would be a 2.0 question.
+
 ## `..` reports the directory's own inode when `lookup(dir, "..")` is unanswered
 
 `backend/readdir.rs`'s `emit` resolves `..`'s inode with `lookup(dir, "..")` and

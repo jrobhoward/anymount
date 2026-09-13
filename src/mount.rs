@@ -169,6 +169,15 @@ impl MountBuilder {
 /// same path, so "unmounts on drop" is a promise this type makes rather than a
 /// side effect of the platform library underneath.
 ///
+/// The OS can unmount first, and nothing here prevents it: ejecting the volume
+/// in Finder, or running `umount` or `fusermount3 -u`, takes the mount down
+/// while this handle still exists. That is not reported — the handle has no
+/// way to learn of it — and it takes down the client side alone, leaving the
+/// server to answer requests that can no longer arrive until teardown runs.
+/// Teardown is what stops the server and clears up after it, and it succeeds
+/// whether or not the mount is still there. See
+/// [`docs/GAPS.md`](https://github.com/jrobhoward/anymount/blob/main/docs/GAPS.md).
+///
 /// [`unmount`]: Mount::unmount
 pub struct Mount {
     /// `None` once teardown has run.
@@ -219,6 +228,12 @@ impl Mount {
     }
 
     /// Unmount explicitly, surfacing errors that `drop` would swallow.
+    ///
+    /// A mount the OS has already taken down is not an error: the call stops
+    /// the server, releases what the backend allocated, and reports success,
+    /// because the state it was asked for is the state that holds. An unmount
+    /// that genuinely fails — a file still open on the mount, say — is still
+    /// reported.
     pub fn unmount(mut self) -> Result<()> {
         match self.inner.take() {
             Some(handle) => handle.unmount(),
