@@ -30,9 +30,39 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   features unify: a dependency graph where anything enables `nfs-tcp` gets the
   fallback back, so `nfs_require_local_socket` is the only way to guarantee its
   absence.
+- Equality on the value types: `PartialEq`/`Eq` on `FileAttr` and `StatFs`,
+  and `PartialEq`/`Eq`/`Hash` on `DirEntry`. An implementor's own tests assert
+  on these types, which previously meant comparing field by field.
+- `Hash`, `PartialOrd` and `Ord` on `FileKind`, so a listing can be grouped or
+  sorted by kind; the order is declaration order, files before directories.
+  `Hash` on `Backend`, so it can key a map.
+- `From<u64>` for `Ino` and `FileHandle`, and `From<Ino>`/`From<FileHandle>`
+  for `u64`. The public field already allowed this; the trait is what generic
+  code reaches for.
+- `# Errors` sections on every fallible public method, naming the `FsError`
+  variants an implementor should return and a caller should expect. The
+  `ReadOnlyFs` contract was previously only inferable from the backends.
+- `#[must_use]` on `MountBuilder`'s methods and the `Mount` accessors. A
+  builder chain whose result is dropped configures nothing, and used to
+  compile without complaint.
+- CI: a `cargo semver-checks` job guarding the frozen surface. It compares
+  against the newest release on crates.io and reports that there is nothing to
+  compare until the first one is published.
+- `Cargo.lock` is committed. The MSRV and packaging jobs build `--locked`, so
+  the declared floor is checked against the versions the repository pins rather
+  than whatever resolved that morning. One job discards the lockfile and
+  resolves fresh, which is what still catches a dependency publishing a release
+  this crate cannot build against.
 
 ### Changed
 
+- `FsError::context` now reports the error it wraps as
+  [`Error::source`](https://doc.rust-lang.org/std/error/trait.Error.html#method.source).
+  The chain used to stop at the explanation, so a caller using `anyhow` saw the
+  context message and nothing underneath it. `Display` is unchanged.
+- `FsError::Context` is `#[non_exhaustive]`, which makes `FsError::context` the
+  only way to build one, as its documentation already said. Matching the
+  variant now needs a `..` rest pattern.
 - macOS: the value in the `MNT` export path and the value prefixing file
   handles are now drawn independently, where they used to be one secret. The
   export path reaches the system mount table and `nfsstat -m`; the handle

@@ -282,6 +282,7 @@ pub struct PlatformInfo {
 ///
 /// `integration` is the value gating newer features: the unrestricted
 /// placeholder-management policies need `0x310` or higher.
+#[must_use]
 pub fn probe() -> Option<PlatformInfo> {
     use windows::Win32::Storage::CloudFilters::CfGetPlatformInfo;
 

@@ -61,11 +61,16 @@ pub enum FsError {
 
     /// An error carrying extra explanation, mapping to the inner errno.
     ///
-    /// Built by [`context`](FsError::context) rather than directly.
+    /// Built by [`context`](FsError::context); `#[non_exhaustive]` so that
+    /// stays the only way to build one.
     #[error("{msg}")]
+    #[non_exhaustive]
     Context {
         /// The error whose `errno` this reports, so the kernel still sees the
-        /// right code.
+        /// right code. Reported as [`Error::source`](std::error::Error::source),
+        /// so the chain a wrapper like `anyhow` prints ends at the underlying
+        /// failure rather than at the explanation.
+        #[source]
         errno_as: Box<FsError>,
         /// The explanation shown to a human.
         msg: String,
@@ -76,7 +81,9 @@ impl FsError {
     /// Wrap this error with human-readable context.
     ///
     /// The errno mapping is preserved, so the kernel still sees the right code
-    /// while the caller gets an explanation.
+    /// while the caller gets an explanation. The wrapped error is reported as
+    /// [`Error::source`](std::error::Error::source).
+    #[must_use]
     pub fn context(self, msg: impl Into<String>) -> Self {
         Self::Context {
             errno_as: Box::new(self),
@@ -141,6 +148,7 @@ impl FsError {
     /// take them from — see the non-Unix implementation for the caveat that
     /// carries.
     #[cfg(unix)]
+    #[must_use]
     pub fn to_errno(&self) -> i32 {
         match self {
             Self::NotFound => libc::ENOENT,
@@ -178,6 +186,7 @@ impl FsError {
     /// an `errno`, so a caller matching on specific numbers should treat that
     /// variant as the exception.
     #[cfg(not(unix))]
+    #[must_use]
     pub fn to_errno(&self) -> i32 {
         // Linux's <asm-generic/errno.h> values.
         const EIO: i32 = 5;

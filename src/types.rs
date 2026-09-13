@@ -26,6 +26,18 @@ impl std::fmt::Display for Ino {
     }
 }
 
+impl From<u64> for Ino {
+    fn from(n: u64) -> Self {
+        Self(n)
+    }
+}
+
+impl From<Ino> for u64 {
+    fn from(ino: Ino) -> Self {
+        ino.0
+    }
+}
+
 /// The root of every mount.
 pub const ROOT_INO: Ino = Ino(1);
 
@@ -40,12 +52,28 @@ impl std::fmt::Display for FileHandle {
     }
 }
 
+impl From<u64> for FileHandle {
+    fn from(n: u64) -> Self {
+        Self(n)
+    }
+}
+
+impl From<FileHandle> for u64 {
+    fn from(fh: FileHandle) -> Self {
+        fh.0
+    }
+}
+
 /// What an inode is.
 ///
-/// Deliberately only two variants: symlinks are not represented because the
-/// first consumer does not back them up, and cfapi does not model them the
-/// way FUSE does. See `docs/GAPS.md`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// Only two variants: symlinks are not represented because the first consumer
+/// does not back them up, and cfapi does not model them the way FUSE does. See
+/// `docs/GAPS.md`.
+///
+/// The [`Ord`] implementation sorts in declaration order, files before
+/// directories, which is enough to group a listing by kind. It carries no
+/// meaning beyond being stable.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FileKind {
     /// A regular file, whose contents come from
     /// [`read_at`](crate::ReadOnlyFs::read_at).
@@ -56,7 +84,7 @@ pub enum FileKind {
 }
 
 /// Metadata for one inode.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileAttr {
     /// Which inode this describes. Must match the [`Ino`] it was requested
     /// for.
@@ -90,6 +118,7 @@ pub struct FileAttr {
 
 impl FileAttr {
     /// A plain read-only regular file owned by the current user.
+    #[must_use]
     pub fn file(ino: Ino, size: u64) -> Self {
         Self {
             ino,
@@ -106,6 +135,7 @@ impl FileAttr {
     }
 
     /// A read-and-traverse directory owned by the current user.
+    #[must_use]
     pub fn dir(ino: Ino) -> Self {
         Self {
             ino,
@@ -123,7 +153,7 @@ impl FileAttr {
 }
 
 /// One entry returned by [`crate::ReadOnlyFs::readdir`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DirEntry {
     /// The entry's inode, which must answer
     /// [`getattr`](crate::ReadOnlyFs::getattr).
@@ -139,7 +169,7 @@ pub struct DirEntry {
 ///
 /// The defaults report an empty filesystem, which is what `df` will show
 /// unless [`statfs`](crate::ReadOnlyFs::statfs) is overridden.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatFs {
     /// Total blocks of [`frsize`](Self::frsize) bytes.
     pub blocks: u64,

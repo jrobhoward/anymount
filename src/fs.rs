@@ -63,9 +63,21 @@ use crate::types::{DirEntry, FileAttr, FileHandle, Ino, StatFs};
 /// cache off the handle should scope it to that handle, not to `ino`.
 pub trait ReadOnlyFs: Send + Sync + 'static {
     /// Resolve `name` within directory `parent`.
+    ///
+    /// # Errors
+    ///
+    /// [`FsError::NotFound`] when `parent` holds no entry called `name`, and
+    /// when `parent` is not a live inode. [`FsError::NotADirectory`] when
+    /// `parent` names a file.
     fn lookup(&self, parent: Ino, name: &OsStr) -> Result<FileAttr>;
 
     /// Fetch attributes for `ino`.
+    ///
+    /// # Errors
+    ///
+    /// [`FsError::NotFound`] when `ino` was never handed out, or belongs to a
+    /// different mount. Every [`Ino`] this filesystem has returned must answer
+    /// for the life of the mount; see "Inode lifetime" above.
     fn getattr(&self, ino: Ino) -> Result<FileAttr>;
 
     /// List directory `ino`, skipping the first `offset` entries.
@@ -83,17 +95,43 @@ pub trait ReadOnlyFs: Send + Sync + 'static {
     /// the whole tail on every call costs real work: FUSE asks for a few
     /// kilobytes at a time, so an unpaged implementation rebuilds the
     /// remainder of a large directory once per call.
+    ///
+    /// # Errors
+    ///
+    /// [`FsError::NotADirectory`] when `ino` names a file, and
+    /// [`FsError::NotFound`] when it names nothing. An `offset` past the end
+    /// of the directory is not an error: it returns an empty page, which is
+    /// how the backend learns the listing is finished.
     fn readdir(&self, ino: Ino, offset: u64) -> Result<Vec<DirEntry>>;
 
     /// Open file `ino`, returning a handle for subsequent reads.
+    ///
+    /// # Errors
+    ///
+    /// [`FsError::IsADirectory`] when `ino` names a directory,
+    /// [`FsError::NotFound`] when it names nothing, and [`FsError::Io`] when
+    /// the backing store cannot be opened.
     fn open(&self, ino: Ino) -> Result<FileHandle>;
 
     /// Read into `buf` starting at `offset`, returning the byte count.
     ///
     /// A short read is only valid at end-of-file.
+    ///
+    /// # Errors
+    ///
+    /// [`FsError::InvalidArgument`] when `fh` is not a live handle from
+    /// [`open`](Self::open), and [`FsError::Io`] when the backing store fails.
+    /// An `offset` at or past end-of-file reads zero bytes rather than
+    /// failing.
     fn read_at(&self, fh: FileHandle, offset: u64, buf: &mut [u8]) -> Result<usize>;
 
-    /// Release a handle from [`open`](Self::open). Errors are logged, not propagated.
+    /// Release a handle from [`open`](Self::open).
+    ///
+    /// # Errors
+    ///
+    /// [`FsError::InvalidArgument`] when `fh` is not a live handle. The
+    /// backend logs whatever is returned and carries on — there is nothing
+    /// left to report it to — so the handle is released either way.
     fn release(&self, fh: FileHandle) -> Result<()>;
 
     /// The kernel no longer needs `ino` cached; see "Inode lifetime" above.
@@ -104,16 +142,32 @@ pub trait ReadOnlyFs: Send + Sync + 'static {
     fn forget(&self, _ino: Ino, _nlookup: u64) {}
 
     /// List extended attribute names for `ino`. Defaults to none.
+    ///
+    /// # Errors
+    ///
+    /// [`FsError::NotFound`] when `ino` names nothing. The default returns an
+    /// empty list and never fails.
     fn listxattr(&self, _ino: Ino) -> Result<Vec<OsString>> {
         Ok(Vec::new())
     }
 
     /// Read one extended attribute. Defaults to "no such attribute".
+    ///
+    /// # Errors
+    ///
+    /// [`FsError::NoXattr`] when `name` is not set on `ino`, which is what the
+    /// default returns, and [`FsError::NotFound`] when `ino` names nothing.
     fn getxattr(&self, _ino: Ino, _name: &OsStr) -> Result<Vec<u8>> {
         Err(FsError::NoXattr)
     }
 
     /// Filesystem-wide statistics. Defaults to all-zero counters.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the implementation cannot compute, usually
+    /// [`FsError::Io`]. The default reports [`StatFs::default`] and never
+    /// fails.
     fn statfs(&self) -> Result<StatFs> {
         Ok(StatFs::default())
     }

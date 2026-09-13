@@ -117,6 +117,13 @@ windows = { version = "0.62", optional = true, features = [
 cognitive_complexity = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
+# A builder whose result is dropped configures nothing, and a `Result`-returning
+# method on a trait implementors write is a contract that has to say which
+# errors it means. Both are gates rather than one-off attributes, so a new
+# public item cannot quietly skip them.
+must_use_candidate = "warn"
+return_self_not_must_use = "warn"
+missing_errors_doc = "warn"
 
 [profile.release]
 strip = true

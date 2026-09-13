@@ -121,6 +121,7 @@ pub mod probe {
     /// supplying it was turned off. It says nothing about whether a mount
     /// would succeed: that also needs `fusermount3` on Linux and a new enough
     /// Windows for cfapi.
+    #[must_use]
     pub fn any_backend_available() -> bool {
         cfg!(all(target_os = "linux", feature = "fuse"))
             || cfg!(all(target_os = "macos", feature = "nfs"))

@@ -267,10 +267,12 @@ jobs:
       # usage newer than that only shows up here, not on a user's older
       # toolchain. `dtolnay/rust-toolchain@stable` in the other jobs drifts
       # forward over time and would not catch this.
-      - run: cargo check --all-targets
+      # `--locked` so the floor is checked against the dependency versions the
+      # repository actually pins, not whatever resolved this morning.
+      - run: cargo check --locked --all-targets
       # Also run them: a test-only helper using an API newer than the floor
       # compiles under `check` but is still a floor violation.
-      - run: cargo test
+      - run: cargo test --locked
 
   licenses:
     name: licence policy
@@ -295,6 +297,18 @@ jobs:
         with:
           command: check advisories
 
+      # `Cargo.lock` is committed, so every other job builds against pinned
+      # versions. This one throws the pins away, which is what catches a
+      # dependency that has published a release this crate cannot build
+      # against. It runs on the weekly schedule as well as on push, so the
+      # news arrives without waiting for a commit.
+      - name: Build against freshly resolved dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y fuse3
+          cargo update
+          cargo check --all-targets
+
   # Catches a packaging problem — a missing file, an unpublishable path
   # dependency — before a release tag rather than after one.
   package:
@@ -304,7 +318,46 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y fuse3
-      - run: cargo publish --dry-run
+      - run: cargo publish --locked --dry-run
+
+  # Guards the frozen 1.0 surface. The value types are deliberately not
+  # `#[non_exhaustive]`, so an added field is a major version — exactly the
+  # mistake that is cheap to make and expensive to publish.
+  semver:
+    name: semver compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The check compares against the newest version on crates.io, so it has
+      # nothing to compare until the first release is published. Detect that
+      # rather than failing the job over it; the check goes live on its own
+      # once 1.0.0 lands, with no edit here.
+      - id: baseline
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: anymount-ci' \
+            https://crates.io/api/v1/crates/anymount)
+          if [ "$code" = "404" ]; then
+            echo "::notice::anymount is not published yet, so there is no baseline to diff against."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          elif [ "$code" = "200" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::crates.io returned HTTP $code; cannot tell whether a baseline exists"
+            exit 1
+          fi
+
+      # Runs on the Linux runner, so it sees the Linux surface plus everything
+      # that is not platform gated. The macOS and Windows backends add no
+      # public items of their own beyond `probe::cfapi`, so what is checked
+      # here is the whole frozen API bar that one re-export.
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        if: steps.baseline.outputs.exists == 'true'
+        with:
+          feature-group: all-features
 
   fmt:
     name: rustfmt

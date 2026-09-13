@@ -227,7 +227,11 @@ between segments. Because consecutive underscores trip `non_snake_case`, every
 `#![allow(clippy::unwrap_used)]` and `#![allow(clippy::expect_used)]`.
 
 **No `.unwrap()` / `.expect()` in production code** — use `?`. `clippy.toml`
-allows them in tests only. Workspace lints also warn on `cognitive_complexity`.
+allows them in tests only. Workspace lints also warn on `cognitive_complexity`,
+`must_use_candidate`, `return_self_not_must_use` and `missing_errors_doc`: a
+new public method that returns `Self` or a `Result` has to carry `#[must_use]`
+or an `# Errors` section naming the `FsError` variants it means. Both are lint
+gates rather than conventions, so neither can be skipped quietly.
 
 **Public docs:** every new public item needs a doc comment — `missing_docs` is
 on, so this is enforced rather than asked for. Doc examples that use a gated
@@ -311,6 +315,9 @@ Before considering any change complete:
   links fail CI)
 - `cargo fmt --all -- --check` is clean
 - `cargo deny check licenses bans sources advisories` passes
+- `Cargo.lock` is committed, so a dependency change shows up in the diff. The
+  MSRV and packaging jobs build `--locked`; one CI job throws the lockfile away
+  and resolves fresh, which is where an upstream breaking release surfaces
 - The two cross-compile checks pass
 - The feature-combination commands pass — both NFS transports on their own,
   `--no-default-features`, and `--features tracing`. A change under a `cfg` or

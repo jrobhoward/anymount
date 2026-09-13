@@ -14,7 +14,7 @@ use crate::fs::ReadOnlyFs;
 /// [`StatFs`](crate::StatFs) — deliberately are not; that was considered for
 /// 1.0 and dropped so implementors can keep building them with struct
 /// literals.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum Backend {
     /// Pick the best available for this OS.
@@ -51,6 +51,7 @@ impl MountBuilder {
     /// On Unix this is a directory that must already exist. On Windows it is the
     /// virtualisation root; cfapi projects into a directory rather than
     /// assigning a drive letter.
+    #[must_use]
     pub fn new(mountpoint: impl AsRef<Path>) -> Self {
         Self {
             mountpoint: mountpoint.as_ref().to_path_buf(),
@@ -64,6 +65,7 @@ impl MountBuilder {
     }
 
     /// Force a specific backend instead of [`Backend::Auto`].
+    #[must_use]
     pub fn backend(mut self, backend: Backend) -> Self {
         self.backend = backend;
         self
@@ -78,6 +80,7 @@ impl MountBuilder {
     /// `-`, and the name is truncated for display; a name left with nothing
     /// usable falls back to `anymount`. The name is unchanged everywhere else
     /// it appears.
+    #[must_use]
     pub fn fs_name(mut self, name: impl Into<String>) -> Self {
         self.fs_name = name.into();
         self
@@ -90,6 +93,7 @@ impl MountBuilder {
     ///
     /// FUSE only. The NFS and cfapi backends have no equivalent and reject the
     /// request at [`mount`](Self::mount) time rather than ignoring it.
+    #[must_use]
     pub fn allow_other(mut self, yes: bool) -> Self {
         self.allow_other = yes;
         self
@@ -105,6 +109,7 @@ impl MountBuilder {
     ///
     /// FUSE only, on the same terms as [`allow_other`](Self::allow_other). An
     /// orderly exit needs it on no backend: dropping the [`Mount`] unmounts.
+    #[must_use]
     pub fn auto_unmount(mut self, yes: bool) -> Self {
         self.auto_unmount = yes;
         self
@@ -130,6 +135,7 @@ impl MountBuilder {
     /// request at [`mount`](Self::mount) time rather than ignoring it, and so
     /// does a build with the `nfs-local-socket` feature turned off, which has
     /// no such path to require.
+    #[must_use]
     pub fn nfs_require_local_socket(mut self, yes: bool) -> Self {
         self.nfs_require_local_socket = yes;
         self
@@ -151,12 +157,25 @@ impl MountBuilder {
     /// [`mount`](Self::mount) time rather than ignored.
     ///
     /// `n` is clamped to at least one.
+    #[must_use]
     pub fn threads(mut self, n: usize) -> Self {
         self.threads = Some(n.max(1));
         self
     }
 
     /// Mount `fs` and return immediately, serving in the background.
+    ///
+    /// # Errors
+    ///
+    /// [`FsError::Unsupported`](crate::FsError::Unsupported) when no backend
+    /// is compiled in for this platform, or when
+    /// [`backend`](Self::backend) named one that is not.
+    /// [`FsError::InvalidArgument`](crate::FsError::InvalidArgument) when the
+    /// mountpoint is not an empty directory where the backend requires one, or
+    /// when an option the chosen backend cannot honor was set — those are
+    /// refused by name rather than ignored. [`FsError::NotADirectory`](crate::FsError::NotADirectory)
+    /// when the mountpoint is a file, and
+    /// [`FsError::Io`](crate::FsError::Io) when the platform's own mount fails.
     pub fn mount<F: ReadOnlyFs>(self, fs: F) -> Result<Mount> {
         backend::mount(self, fs)
     }
@@ -200,6 +219,7 @@ impl Mount {
     }
 
     /// Where this filesystem is mounted.
+    #[must_use]
     pub fn mountpoint(&self) -> &Path {
         &self.mountpoint
     }
@@ -208,6 +228,7 @@ impl Mount {
     ///
     /// Never [`Backend::Auto`]: that is resolved to a concrete backend at
     /// mount time.
+    #[must_use]
     pub fn backend(&self) -> Backend {
         self.backend
     }
@@ -223,6 +244,7 @@ impl Mount {
     /// [`MountBuilder::nfs_require_local_socket`] turns that fallback into a
     /// mount error, for a caller who would rather not mount than mount on the
     /// weaker terms.
+    #[must_use]
     pub fn nfs_uses_local_socket(&self) -> bool {
         self.local_socket
     }
@@ -234,6 +256,12 @@ impl Mount {
     /// because the state it was asked for is the state that holds. An unmount
     /// that genuinely fails — a file still open on the mount, say — is still
     /// reported.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the platform reports for a failed unmount, usually
+    /// [`FsError::Io`](crate::FsError::Io) wrapping `EBUSY` when a file is
+    /// still open on the mount.
     pub fn unmount(mut self) -> Result<()> {
         match self.inner.take() {
             Some(handle) => handle.unmount(),
