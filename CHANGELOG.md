@@ -100,6 +100,58 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the feature flags. The detail it used to carry on the macOS NFS transports
   now lives in `docs/GAPS.md`. Screenshots of the `memfs` example mounted on
   each platform are in `docs/screenshots/`, kept out of the published package.
+- `docs/GAPS.md` gains a section on extended attributes, which `README.md`
+  listed as a limitation but which was catalogued nowhere: `listxattr` and
+  `getxattr` are called only by the FUSE backend, so overriding them has no
+  effect on macOS or Windows. It also gains one on the Linux backend needing
+  `fusermount3` installed, the one install step any platform requires.
+- `docs/GAPS.md` is grouped by area — scope, the trait contract, then one
+  section per platform — instead of a flat list, and the cases for cfapi over
+  ProjFS and for NFS over macFUSE have moved to `docs/ARCHITECTURE.md`, which
+  is where the choice between backends belongs. What stays in `docs/GAPS.md`
+  is the constraint a ProjFS backend would still face: its entry points have to
+  be resolved dynamically, since `Client-ProjFS` is off by default and a static
+  import would stop the binary starting on a machine without it.
+- Corrected in `docs/GAPS.md`: there is no FUSE fallback on macOS, so the
+  macFUSE note no longer implies one; the thread-count knob is
+  `MountBuilder::threads`, not `fuser`'s internal `Config::n_threads`;
+  `deny.toml` allows licences rather than named crates, so `onc-rpc` is not
+  "on the allow-list"; and the cfapi read-pattern cross-reference pointed at a
+  section of `docs/GAPS.md` that does not exist.
+- `docs/ARCHITECTURE.md` gains the parts that make it an architecture doc
+  rather than an annotated file listing: the request path, with a diagram of
+  how a read reaches `ReadOnlyFs` by three different routes; the mount
+  lifecycle as a sequence diagram; and which threads call the trait on each
+  backend, with who owns the implementation. `lib.rs` and its `probe` module
+  are in the module map now. The sections that restated `README.md`,
+  `CHANGELOG.md` or `docs/GAPS.md` — design constraints, status, and the
+  per-platform constraint list — are gone, replaced by one on the seams a new
+  backend goes through. `README.md`'s backend section is a pointer to it
+  rather than a second copy of the argument.
+- Spelling is consistent across `README.md` and `docs/`: `-ize` verbs, `-our`
+  nouns. `docs/ARCHITECTURE.md` previously had "materialise" and
+  "materializes" in the same file.
+- Corrected in `CLAUDE.md`: the NFS gating note predated the transport split
+  and named the wrong files. `local.rs`, `tcp.rs` and `NfsHandle` are what is
+  macOS-gated.
+- `docs/NFS_ACCESS_CONTROL_OPTIONS.md` is removed. It was the design note
+  behind the macOS access-control decision, and that decision shipped: the
+  local socket with the root handle supplied directly, the two-secret split
+  behind it, and `nfs_require_local_socket` to refuse the fallback. It had also
+  been shipping to crates.io, unlike the other working documents. Two findings
+  that lived only there have moved into `docs/GAPS.md` — that reconnection over
+  the local socket is untested, and what was ruled out before settling for the
+  handle secret: a reserved source port needs root, peer credentials report
+  uid 0 because the kernel owns the client end, `RPCSEC_GSS` needs Kerberos, and
+  the sysctl that would read mount arguments back is entitlement-gated.
+
+### Added
+
+- A test covering the NFS server across a dropped connection: the accept loop
+  is driven over an `AF_UNIX` socket through more disconnect-and-redial cycles
+  than `MAX_CONNECTIONS` allows, requiring every one to be answered. It pins
+  the worker reaping as much as the reconnection — without it the seventeenth
+  redial waits in the listen backlog until unmount.
 
 ## 1.0.0
 

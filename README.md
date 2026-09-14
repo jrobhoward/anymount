@@ -81,7 +81,7 @@ impl ReadOnlyFs for Greeting {
         if ino != ROOT_INO {
             return Err(FsError::NotADirectory);
         }
-        // `.` and `..` are synthesised by the backend, never returned here.
+        // `.` and `..` are synthesized by the backend, never returned here.
         // An empty result is what ends the listing, so honour the offset.
         Ok(std::iter::once(DirEntry {
             ino: FILE,
@@ -147,8 +147,9 @@ one would likely be 2.0, since the value types are not `#[non_exhaustive]`.
 what changing it would cost.
 
 - Read-only. Write operations report `EROFS`.
-- No extended attributes beyond `listxattr`/`getxattr`'s harmless defaults,
-  and no Windows alternate data streams.
+- No extended attributes. `listxattr` and `getxattr` have defaults that report
+  none, and only the FUSE backend calls them at all, so overriding them has no
+  effect on macOS or Windows. No Windows alternate data streams either.
 - No symlinks or hardlinks: `FileKind` has only `File` and `Directory`.
 - No filesystem size. The default `statfs` reports zeroed counters, so `df`
   shows an empty volume; an implementation that knows its own size can
@@ -157,7 +158,7 @@ what changing it would cost.
   threads, not from async.
 - `read_at` takes an offset, but only FUSE issues random reads. cfapi fetches a
   whole file on first touch. An archive that can only decode from byte 0 should
-  materialise on open and serve reads from a cache.
+  materialize on open and serve reads from a cache.
 - Windows gets a directory, not a drive letter, and that directory must be
   empty. cfapi projects its entries into the mountpoint rather than covering
   it, and clears them again on unmount, so mounting over existing files would
@@ -251,11 +252,10 @@ dev-dependency of the example, not of the library.
 Nothing in Rust spans all three platforms behind one API — the nearest
 equivalent in any language is Go's `cgofuse`, which does not cover Windows. So
 each platform gets the mechanism that fits it rather than a lowest common
-denominator: FUSE on Linux, a from-scratch NFSv3 server on macOS (FUSE there
-needs a kernel extension, and WebDAV made Finder download a whole file on every
-folder view), and the Cloud Files API on Windows (ProjFS was evaluated but set
-aside). [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the reasoning for
-each.
+denominator, with the licence constraint narrowing the field: the obvious
+binding for each of these platform APIs is GPL or LGPL, and the crate uses none
+of them. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the case for each
+choice, the request path through each backend, and the seams they share.
 
 All three mount, read and unmount, and each is exercised against a real mount
 in CI on its own platform — `ls`, `cat`, `find`, and a checksum compared

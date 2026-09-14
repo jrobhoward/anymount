@@ -106,9 +106,11 @@ day to day:
   backend supplies a `mount` function, a `Mounted` impl, and a `Caps` — not a
   fourth policy bolted onto one of those seams.
 - The NFS wire layer (`xdr.rs`, `rpc.rs`, `handle.rs`, `mount_proto.rs`,
-  `nfs_proto.rs`, `server.rs`) builds and tests on any Unix; only `mod.rs`'s
-  `mount` and `NfsHandle` are macOS-gated. It carries a scoped `dead_code`
-  allow off macOS.
+  `nfs_proto.rs`, `transport.rs`, `server.rs`) and the `mount_args.rs` encoder
+  build and test on any Unix; only `local.rs`, `tcp.rs` and `NfsHandle` are
+  macOS-gated — the parts that call `mount(2)`, run `mount_nfs` and call
+  `libc::unmount`. Each carries a scoped `dead_code` allow off macOS rather
+  than the module carrying a blanket one.
 
 ## Platform constraints worth knowing before editing a backend
 
@@ -159,7 +161,7 @@ Do not add `fuser`'s default features to the Linux target.
 handle this server hands out, and the same secret is required as a literal
 path segment in `MNT` (`/export/<hex secret>/<label>`). Do not add real
 credential checking on top of this without revisiting
-`docs/ARCHITECTURE.md`'s platform constraints — it is a deliberate choice, not
+`docs/ARCHITECTURE.md`'s seams and invariants — it is a deliberate choice, not
 an oversight.
 
 The trailing `<label>` is decorative and authorizes nothing. It exists because

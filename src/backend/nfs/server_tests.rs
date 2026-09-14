@@ -214,3 +214,61 @@ fn serve_connection____accepted_socket____honours_the_read_timeout_rather_than_s
          the socket is still non-blocking, so the read timeout is inert"
     );
 }
+
+/// A dropped connection frees its slot, and a client that redials is served.
+///
+/// `run` caps concurrent connections at `MAX_CONNECTIONS` and reaps finished
+/// workers each time round the accept loop. If a closed connection kept its
+/// slot, a client that reconnected often enough would find the server at
+/// capacity and sit in the listen backlog until unmount — so this reconnects
+/// more times than the cap allows and requires every one of them to be
+/// answered.
+///
+/// This is the server's half of a reconnection, over the same `AF_UNIX`
+/// transport the macOS local-socket path mounts. Whether the kernel NFS
+/// client redials a connection it lost is a property of the client, not of
+/// this code, and is not exercised here — see `docs/GAPS.md`.
+#[test]
+fn run____a_client_reconnecting_more_times_than_the_cap____is_served_every_time() {
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("s");
+    let listener = UnixListener::bind(&path).expect("bind the socket");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            run(
+                listener,
+                Arc::new(NeverCalled),
+                Arc::new(FileHandle3::for_test(1)),
+                Arc::new(serving_mount()),
+                stop,
+            );
+        })
+    };
+
+    for cycle in 0..MAX_CONNECTIONS + 4 {
+        let mut stream = UnixStream::connect(&path).expect("connect to the socket");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("arm a read timeout");
+
+        rpc::write_message(&mut stream, &call(NFS_PROG, 3, 0)).expect("send NFS NULL");
+        let reply = rpc::read_message(&mut stream)
+            .unwrap_or_else(|e| panic!("cycle {cycle}: reading the reply failed: {e}"))
+            .unwrap_or_else(|| panic!("cycle {cycle}: server closed without replying"));
+
+        let (xid, accept_stat) = accepted(&reply);
+        assert_eq!(xid, 77, "cycle {cycle}: wrong xid");
+        assert_eq!(accept_stat, 0, "cycle {cycle}: not SUCCESS");
+
+        // Closing is the point: the next iteration is a fresh connection.
+        drop(stream);
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("the accept loop exits when stopped");
+}
