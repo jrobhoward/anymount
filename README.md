@@ -1,28 +1,50 @@
 # anymount
 
+This crate mounts a read-only filesystem from user space on Linux, macOS or
+Windows. An implementor writes one trait, `ReadOnlyFs`, and the crate mounts it
+with a mechanism available on the host OS: FUSE on Linux, an NFSv3
+server on macOS, the Cloud Files API on Windows. What appears to the user is an ordinary
+directory that `ls`, `cat`, Finder or Explorer read like any other.
+
+It lacks much of what a full filesystem does. Writes report `EROFS`, there are
+no symlinks, no extended attributes, no alternate data streams, and `df`
+reports an empty volume. In exchange, mounting requires no kernel extension
+(except Linux's FUSE), no driver to install, and no administrator privileges.
+
 [![crates.io](https://img.shields.io/crates/v/anymount.svg)](https://crates.io/crates/anymount)
 [![docs.rs](https://docs.rs/anymount/badge.svg)](https://docs.rs/anymount)
 [![CI](https://github.com/jrobhoward/anymount/actions/workflows/ci.yml/badge.svg)](https://github.com/jrobhoward/anymount/actions/workflows/ci.yml)
 
-Mount a read-only filesystem from user space on Linux, macOS and Windows by
-implementing one trait.
+| Linux | macOS | Windows |
+|---|---|---|
+| ![A file manager on Linux showing the mounted example tree](docs/screenshots/linux.png) | ![Finder on macOS showing the mounted example tree](docs/screenshots/macos.png) | ![Explorer on Windows showing the mounted example tree](docs/screenshots/windows.png) |
 
-```sh
-cargo add anymount
-```
+The same in-memory tree from `examples/memfs.rs`, mounted on each platform and
+opened in its file manager.
 
-| OS | Mechanism | Install burden |
-|----|-----------|----------------|
-| Linux | FUSE via `fusermount3` | `apt install fuse3`; mounts unprivileged |
-| macOS | NFSv3 via the built-in `mount_nfs` | none; no macFUSE, no kernel extension, no root |
-| Windows | Cloud Files (cfapi) | none |
+### Documentation
 
-Requires Rust 1.88 or newer.
+[Module documentation with examples](https://docs.rs/anymount), including the
+full `ReadOnlyFs` method list and what each backend does with it.
 
-## Implementing the trait
+### Usage
 
-`ReadOnlyFs` has six required methods. Inodes are `u64` and stable for the
-life of the mount; the root is always `ROOT_INO`.
+Add `anymount` to `Cargo.toml`, or run `cargo add anymount`. Rust 1.88 or
+newer is required.
+
+| OS | Mechanism | What has to be installed |
+|----|-----------|--------------------------|
+| Linux | FUSE, via the `fusermount3` binary | `fuse3` from the distribution; mounts unprivileged |
+| macOS | NFSv3, served by this crate and mounted by the built-in NFS client | nothing: no macFUSE, no kernel extension, no root |
+| Windows | Cloud Files (cfapi) | nothing |
+
+`cargo run --example probe` reports which backend a given machine can actually
+use, and needs neither a mountpoint nor privileges.
+
+### Usage: implementing the trait
+
+`ReadOnlyFs` has six required methods. Inodes are `u64` and stable for the life
+of the mount; the root is always `ROOT_INO`.
 
 ```rust
 use std::ffi::{OsStr, OsString};
@@ -96,55 +118,54 @@ fn mount_it() -> Result<()> {
 }
 ```
 
-That example is compiled by `cargo test`, so it cannot drift from the API.
+`listxattr`, `getxattr`, `statfs` and `forget` have harmless defaults,
+so an implementation only overrides what it has answers for.
 
-`listxattr`, `getxattr`, `statfs` and `forget` have defaults that do the
-harmless thing, so an implementation only overrides what it has answers for.
+The same code mounts on all three platforms. `MountBuilder` picks the backend
+from the target, and the options a backend cannot honour are rejected at
+`mount()` rather than ignored — `allow_other`, `auto_unmount` and `threads`
+are FUSE-only, and asking for one elsewhere is an error.
 
-The mount is torn down when the `Mount` is dropped. Calling `unmount()`
-explicitly does the same thing and returns the errors that dropping discards.
-Either one succeeds on a mount the OS has already taken down, so ejecting the
-volume first costs nothing.
+### Usage: unmounting
 
-## Caveats worth knowing before use
+Dropping the `Mount` tears the mount down. Calling `unmount()` does the same
+thing and returns the errors that dropping discards. Either will succeed on a mount
+the OS has already taken down, so ejecting the volume first costs nothing.
 
-1.0 is feature-complete. None of the limitations below were required by the
-crate's original use case, so none are planned for a 1.x release; a future
-version that adds one is likely a 2.0, since the value types below are not
-`#[non_exhaustive]`.
+An unmount the OS starts is not reported back. Ejecting in Finder, or running
+`umount` or `fusermount3 -u`, takes the mount down at any time; the server
+behind it keeps running until the `Mount` is dropped, and there is no query or
+callback for the mount having gone. A process killed by a signal may leave the
+mount in place instead, since `Drop` does not run.
 
-- Read-only. Write operations report `EROFS`, and that is the scope rather
-  than a stage. Every limitation is catalogued in [`docs/GAPS.md`](docs/GAPS.md).
-- On macOS, a mount that falls back to loopback TCP is reachable by any local
-  account. The NFS backend prefers an `AF_UNIX` socket, where access is decided
-  by file permissions and nothing is published to the system mount table, but
-  that path needs an interface macOS does not document and falls back when it
-  fails. `Mount::nfs_uses_local_socket` reports which path a mount took, and
-  `MountBuilder::nfs_require_local_socket` refuses the fallback rather than
-  mounting on the weaker terms.
-  See [`docs/GAPS.md`](docs/GAPS.md).
-- No symlinks or hardlinks: `FileKind` has only `File` and `Directory`.
+### Scope: What it does not do
+
+1.0 is feature-complete. None of the limits below were needed for the crate's
+original use case, so none are planned for a 1.x release.  A version that adds
+one would likely be 2.0, since the value types are not `#[non_exhaustive]`.
+[`docs/GAPS.md`](docs/GAPS.md) catalogues every limitation, why it exists, and
+what changing it would cost.
+
+- Read-only. Write operations report `EROFS`.
 - No extended attributes beyond `listxattr`/`getxattr`'s harmless defaults,
   and no Windows alternate data streams.
-- The Windows mountpoint must be an empty directory. cfapi projects its
-  entries into that directory rather than covering it, and clears them again
-  on unmount, so mounting over existing files would destroy them; `mount()`
-  refuses rather than risk it.
-- Windows gets a directory, not a drive letter. cfapi projects into a
-  virtualisation root and cannot assign `X:`.
-- `read_at` takes an offset, but only FUSE issues random reads. cfapi fetches
-  a whole file on first touch. An archive that can only decode from byte 0
-  should materialise on open and serve reads from a cache.
+- No symlinks or hardlinks: `FileKind` has only `File` and `Directory`.
+- No filesystem size. The default `statfs` reports zeroed counters, so `df`
+  shows an empty volume; an implementation that knows its own size can
+  override it, and on Windows nothing asks.
 - The trait is synchronous. Concurrency comes from serving requests on several
   threads, not from async.
-- An unmount started by the OS is not reported. Ejecting the volume in Finder,
-  or running `umount` or `fusermount3 -u`, takes the mount down at any time;
-  the server behind it keeps running until the `Mount` is dropped, and there is
-  no query or callback for the mount having gone. A process killed by a signal
-  leaves the mount in place instead, since `Drop` does not run.
-  See [`docs/GAPS.md`](docs/GAPS.md).
+- `read_at` takes an offset, but only FUSE issues random reads. cfapi fetches a
+  whole file on first touch. An archive that can only decode from byte 0 should
+  materialise on open and serve reads from a cache.
+- Windows gets a directory, not a drive letter, and that directory must be
+  empty. cfapi projects its entries into the mountpoint rather than covering
+  it, and clears them again on unmount, so mounting over existing files would
+  destroy them; `mount()` refuses rather than risk it.
+- On macOS, a mount that falls back to loopback TCP is reachable by any local
+  account. See the transport comparison below.
 
-## Feature flags
+### Crate features
 
 | Feature | Default | Effect |
 |---|---|---|
@@ -155,15 +176,15 @@ version that adds one is likely a 2.0, since the value types below are not
 | `cfapi` | yes | Cloud Files backend. Windows only |
 | `tracing` | no | Logs mounts, unmounts and the errors a backend has to discard |
 
-All three backends default on because cargo cannot express a per-OS default;
-the platform dependencies are `cfg`-scoped, so a Linux build never fetches the
+All three backends default on because cargo cannot express a per-OS default.
+The platform dependencies are `cfg`-scoped, so a Linux build never fetches the
 `windows` crate.
 
-### Choosing a macOS NFS transport
+### Crate features: choosing a macOS NFS transport
 
-The two transport features are a trade between how private a mount is and how
-much of the mechanism macOS documents. Both are on by default, which tries the
-local socket first and falls back to loopback TCP.
+The two transport features trade how private a mount is against how much of the
+mechanism macOS documents. Both are on by default, which tries the local socket
+first and falls back to loopback TCP.
 
 | Features | Mount is private to the mounting user | Documented interfaces only | If the private encoding breaks |
 |---|---|---|---|
@@ -172,16 +193,15 @@ local socket first and falls back to loopback TCP.
 | `nfs-tcp` alone | no | yes | not applicable |
 
 `nfs-local-socket` passes the root file handle to `mount(2)` in an argument
-buffer whose layout macOS does not document — `<nfs/nfs.h>` declares the
-attribute numbers behind `__APPLE_API_PRIVATE` and the layout nowhere, and the
-socket netid the buffer names is absent from `mount_nfs(8)`. Nothing is
-compiled against that header: the constants are transcribed, and the only libc
-calls are `mount(2)` and `unmount(2)`, both of which have man pages. The risk
-is that a future macOS changes the encoding, not that the crate fails to build.
-
-`nfs-tcp` runs `/sbin/mount_nfs` with options its man page documents, and uses
-nothing undocumented. It costs reachability: the export path reaches the system
-mount table and `nfsstat -m`, where any local account can read it.
+buffer whose layout macOS does not document, so the MOUNT protocol never runs,
+nothing listens on the network, and socket permissions decide who may connect.
+Nothing is compiled against a private header — the constants are transcribed,
+and the only libc calls are `mount(2)` and `unmount(2)` — so a macOS that
+changes the encoding costs a failed mount, not a failed build. `nfs-tcp` runs
+`/sbin/mount_nfs` with documented options instead, and pays for that in
+reachability: its export path reaches the system mount table and `nfsstat -m`,
+where any local account can read it. [`docs/GAPS.md`](docs/GAPS.md) has both in
+full.
 
 Turning `nfs-tcp` off does not guarantee its absence, because cargo features
 unify — another crate in the dependency graph enabling it brings the fallback
@@ -192,53 +212,7 @@ reports which transport a live mount got.
 `nfs` with neither transport is a compile error rather than a backend that
 cannot mount.
 
-## Status
-
-All three backends mount, read and unmount, and each is exercised against a
-real mount in CI on its own platform — `ls`, `cat`, `find`, and a checksum
-compared against one computed outside the mount.
-
-## Why three backends, not one mechanism everywhere
-
-Nothing in Rust spans all three platforms behind one API — the nearest
-equivalent in any language is Go's `cgofuse`, which does not cover Windows.
-So each platform gets the mechanism that fits it best rather than a lowest
-common denominator: FUSE on Linux, a from-scratch NFSv3 server on macOS
-(FUSE there needs a kernel extension; WebDAV made Finder download a whole
-file on every folder view), and the Cloud Files API on Windows (ProjFS was
-evaluated and set aside — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)).
-`winfsp`, `dokan` and `windows-projfs` are also Windows-only and copyleft;
-see Licensing below.
-
-## Licensing
-
-MIT OR Apache-2.0, with no copyleft anywhere in the dependency graph. That is a
-design constraint, enforced in CI by `cargo deny check licenses bans`, and it
-rules out the obvious bindings for these platform APIs — so the crate routes
-around them. Windows goes through Microsoft's own `windows` crate rather than
-GPL `windows-projfs` or `winfsp`; Linux builds `fuser` without default
-features, mounting through the `fusermount3` binary instead of linking LGPL
-libfuse, which also enables unprivileged mounts; macOS needs nothing beyond the
-standard library to reach `mount_nfs`. `deny.toml` bans the copyleft crates by
-name, so an accidental `cargo add` fails loudly rather than quietly relicensing
-the crate.
-
-## Opening the mount in a file manager
-
-`anymount` never relocates a mount: `Mount::mountpoint()` is always exactly the
-path given to `MountBuilder::new`, on all three backends. There is no
-`/Volumes`-style OS-injected location to look up, so opening a native window at
-that path is a one-line job left to the caller:
-
-```rust,ignore
-let mount = MountBuilder::new("/mnt/restore").mount(my_fs)?;
-opener::open(mount.mountpoint())?;
-```
-
-`examples/memfs.rs` demonstrates this behind an `--open` flag; `opener` is a
-dev-dependency of the example, not of the library.
-
-## Try it
+### Try it
 
 ```sh
 mkdir -p /tmp/anymount-demo
@@ -254,7 +228,40 @@ cat /tmp/anymount-demo/hello.txt
 sha256sum /tmp/anymount-demo/numbers.txt   # matches `seq 1 100 | sha256sum`
 ```
 
-## Development
+Adding `--open` to the `memfs` line also pops a file-manager window at the
+mount root, which is how the screenshots above were taken.
+
+### Opening the mount in a file manager
+
+A mount is never relocated: `Mount::mountpoint()` is always exactly the path
+given to `MountBuilder::new`, on all three backends. There is no
+`/Volumes`-style OS-injected location to look up, so opening a native window at
+that path is a one-line job left to the caller.
+
+```rust,ignore
+let mount = MountBuilder::new("/mnt/restore").mount(my_fs)?;
+opener::open(mount.mountpoint())?;
+```
+
+`examples/memfs.rs` does this behind its `--open` flag; `opener` is a
+dev-dependency of the example, not of the library.
+
+### Why three backends, not one mechanism everywhere
+
+Nothing in Rust spans all three platforms behind one API — the nearest
+equivalent in any language is Go's `cgofuse`, which does not cover Windows. So
+each platform gets the mechanism that fits it rather than a lowest common
+denominator: FUSE on Linux, a from-scratch NFSv3 server on macOS (FUSE there
+needs a kernel extension, and WebDAV made Finder download a whole file on every
+folder view), and the Cloud Files API on Windows (ProjFS was evaluated but set
+aside). [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the reasoning for
+each.
+
+All three mount, read and unmount, and each is exercised against a real mount
+in CI on its own platform — `ls`, `cat`, `find`, and a checksum compared
+against one computed outside the mount.
+
+### Development
 
 ```sh
 cargo test
@@ -271,10 +278,22 @@ cargo +1.88.0 check --all-targets
 ```
 
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) covers the module layout and
-design rationale; [`CLAUDE.md`](CLAUDE.md) records the conventions and
-platform constraints a contributor needs before editing a backend.
+design rationale; [`CLAUDE.md`](CLAUDE.md) records the conventions and platform
+constraints a contributor needs before editing a backend.
 
-## License
+### Minimum Rust version policy
 
-MIT ([LICENSE-MIT](LICENSE-MIT)) or Apache-2.0 ([LICENSE-APACHE](LICENSE-APACHE)),
+The minimum supported `rustc` version is 1.88.0, declared as `rust-version` in
+`Cargo.toml` and checked by a CI job pinned to that exact toolchain. The policy
+is that the minimum can rise in a minor version update.
+
+### License
+
+This project is licensed under either of
+
+ * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or
+   https://www.apache.org/licenses/LICENSE-2.0)
+ * MIT license ([LICENSE-MIT](LICENSE-MIT) or
+   https://opensource.org/licenses/MIT)
+
 at your option.

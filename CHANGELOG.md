@@ -93,6 +93,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   previously `==`, and mattered little while the same secret was readable from
   the mount table; splitting the two values is what made it worth fixing.
 
+### Documented
+
+- `README.md` is reorganised around what a reader decides in order: what the
+  crate mounts and what it will not do, then the trait, then the limits, then
+  the feature flags. The detail it used to carry on the macOS NFS transports
+  now lives in `docs/GAPS.md`. Screenshots of the `memfs` example mounted on
+  each platform are in `docs/screenshots/`, kept out of the published package.
+
 ## 1.0.0
 
 First stable release. The public API is frozen: `ReadOnlyFs`, the value types

@@ -11,9 +11,7 @@ homepage = "https://github.com/jrobhoward/anymount"
 keywords = ["filesystem", "fuse", "nfs", "cfapi", "mount"]
 categories = ["filesystem", "os"]
 readme = "README.md"
-# Working documents kept in the repository for their reasoning, but not part
-# of what the crate ships: a historical spike write-up and a closed review.
-exclude = ["docs/macos_nfs_plan.md", "docs/v1-readiness.md"]
+exclude = ["docs/screenshots"]
 
 # docs.rs builds for x86_64-unknown-linux-gnu by default, which would publish
 # only the Linux backend's surface for a crate whose point is spanning three
